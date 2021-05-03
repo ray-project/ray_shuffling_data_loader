@@ -1,0 +1,73 @@
+# Python byte code files
+*.pyc
+python/.eggs
+
+# Backup files
+*.bak
+
+# Emacs temporary files
+*~
+*#
+
+# Debug symbols
+*.pdb
+
+# Visual Studio files
+/packages
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+
+# Protobuf-generated files
+*_pb2.py
+*.pb.h
+*.pb.cc
+
+# OS X folder attributes
+.DS_Store
+
+# Debug files
+*.dSYM/
+*.su
+
+# Python setup files
+*.egg-info
+
+# Python build output
+/build
+/dist
+
+# Compressed files
+*.gz
+
+# User-specific stuff:
+.idea/
+
+# Pytest Cache
+**/.pytest_cache
+**/.cache
+
+# Vscode
+.vscode/
+
+# python virtual env
+venv
+
+# pyenv version file
+.python-version
+
+# Vim
+.*.swp
+*.swp
+tags
+
+# Emacs
+.#*
+
+# Generated  stats and synthetic data
+*.csv
+*.csv.gz
+*.parquet
+*.parquet.gzip
+*.parquet.snappy
