@@ -8,19 +8,18 @@ import numpy as np
 import ray
 from ray_shuffling_data_loader.shuffle import (
     shuffle_with_stats, shuffle_no_stats)
+from ray_shuffling_data_loader.dataset import BatchConsumerQueue
+from ray_shuffling_data_loader.batch_queue import BatchQueue
 from ray_shuffling_data_loader.stats import (
     process_stats, human_readable_size)
 
 from ray_shuffling_data_loader.data_generation import generate_data
 
+BATCHQUEUE_ACTOR_NAME = "BatchQueue"
 DEFAULT_DATA_DIR = "/mnt/disk0/benchmark_scratch"
 DEFAULT_STATS_DIR = "./results"
 
 DEFAULT_UTILIZATION_SAMPLE_PERIOD = 5.0
-
-
-def dummy_batch_consumer(consumer_idx, epoch, batches):
-    pass
 
 
 def run_trials(num_epochs,
@@ -44,9 +43,20 @@ def run_trials(num_epochs,
     if num_trials is not None:
         for trial in range(num_trials):
             print(f"Starting trial {trial}.")
+            batch_queue = BatchQueue(
+                num_epochs,
+                num_trainers,
+                max_concurrent_epochs,
+                maxsize=0,
+                name=BATCHQUEUE_ACTOR_NAME,
+                connect=False,
+                wait_for_trainers=False)
+            batch_consumer = BatchConsumerQueue(batch_queue)
+            # Wait until batch queue actor has been created.
+            batch_queue.ready()
             stats, store_stats = shuffle(
-                filenames, dummy_batch_consumer, num_epochs, num_reducers,
-                num_trainers, max_concurrent_epochs, utilization_sample_period)
+                filenames, batch_consumer, num_epochs, num_reducers,
+                num_trainers, utilization_sample_period)
             duration = stats.duration if collect_stats else stats
             print(f"Trial {trial} done after {duration} seconds.")
             all_stats.append((stats, store_stats))
@@ -55,9 +65,20 @@ def run_trials(num_epochs,
         trial = 0
         while timeit.default_timer() - start < trials_timeout:
             print(f"Starting trial {trial}.")
+            batch_queue = BatchQueue(
+                num_epochs,
+                num_trainers,
+                max_concurrent_epochs,
+                maxsize=0,
+                name=BATCHQUEUE_ACTOR_NAME,
+                connect=False,
+                wait_for_trainers=False)
+            batch_consumer = BatchConsumerQueue(batch_queue)
+            # Wait until batch queue actor has been created.
+            batch_queue.ready()
             stats, store_stats = shuffle(
-                filenames, dummy_batch_consumer, num_epochs, num_reducers,
-                num_trainers, max_concurrent_epochs, utilization_sample_period)
+                filenames, batch_consumer, num_epochs, num_reducers,
+                num_trainers, utilization_sample_period)
             duration = stats.duration if collect_stats else stats
             print(f"Trial {trial} done after {duration} seconds.")
             all_stats.append((stats, store_stats))

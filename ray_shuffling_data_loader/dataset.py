@@ -1,13 +1,12 @@
-import functools
-from typing import List, Iterable
+from typing import List
 
 import pandas as pd
 import ray
 from ray._private.utils import get_num_cpus
-from ray_shuffling_data_loader.shuffle import shuffle
-from ray_shuffling_data_loader.multiqueue import MultiQueue
+from ray_shuffling_data_loader.shuffle import shuffle, BatchConsumer
+from ray_shuffling_data_loader.batch_queue import BatchQueue
 
-MULTIQUEUE_ACTOR_NAME = "MultiQueue"
+BATCHQUEUE_ACTOR_NAME = "BatchQueue"
 REDUCER_CLUSTER_CORE_SHARE = 0.6
 
 
@@ -53,32 +52,35 @@ class ShufflingDataset:
             # rank == 0 --> master process
             # Create the batch queue. Trainers will consume GPU batches
             # through this batch queue.
-            self._batch_queue = MultiQueue(
-                num_epochs * num_trainers,
+            self._batch_queue = BatchQueue(
+                num_epochs,
+                num_trainers,
+                max_concurrent_epochs,
                 max_batch_queue_size,
-                name=MULTIQUEUE_ACTOR_NAME,
+                name=BATCHQUEUE_ACTOR_NAME,
                 connect=False)
+            self._consumer = BatchConsumerQueue(self._batch_queue)
             # Wait until actor has been created.
-            self._batch_queue.size(0)
+            self._batch_queue.ready()
             # Kick off shuffle.
             # TODO(Clark): Move the shuffle kickoff to an init() method so the
             # user can better control when the shuffling starts?
             self._shuffle_result = ray.remote(shuffle).remote(
                 filenames,
-                functools.partial(batch_consumer, self._batch_queue,
-                                  batch_size, num_trainers),
+                self._consumer,
                 num_epochs,
                 num_reducers,
                 num_trainers,
-                max_concurrent_epochs,
                 collect_stats=False)
         else:
             # rank != 0 --> worker process
             # Connect to the batch queue.
-            self._batch_queue = MultiQueue(
-                num_epochs * num_trainers,
+            self._batch_queue = BatchQueue(
+                num_epochs,
+                num_trainers,
+                max_concurrent_epochs,
                 max_batch_queue_size,
-                name=MULTIQUEUE_ACTOR_NAME,
+                name=BATCHQUEUE_ACTOR_NAME,
                 connect=True)
             self._shuffle_result = None
 
@@ -117,8 +119,8 @@ class ShufflingDataset:
         # Batch leftover buffer.
         df_buffer = None
         while True:
-            queue_idx = self._epoch * self._num_trainers + self._rank
-            batches = self._batch_queue.get(queue_idx, block=True)
+            batches = self._batch_queue.get(
+                self._rank, self._epoch, block=True)
             if batches is None:
                 break
             df = ray.get(batches)
@@ -146,32 +148,35 @@ class ShufflingDataset:
             pos += self._batch_size
             if pos < len(df):
                 df_buffer = df[pos:]
+            # Signal to the queue that we're done processing these GPU batches.
+            self._batch_queue.task_done(self._rank, self._epoch)
         # Yield leftover (incomplete) batch if we're not dropping incomplete
         # batches.
         if df_buffer is not None and not self._drop_last:
             yield df_buffer
+        # Signal to the queue that we're done processing the last GPU batch.
+        self._batch_queue.task_done(self._rank, self._epoch)
         self._last_epoch = self._epoch
         if (self._epoch == self._num_epochs - 1
                 and self._shuffle_result is not None):
             ray.get(self._shuffle_result)
 
 
-def batch_consumer(queue: MultiQueue, batch_size: int, num_trainers: int,
-                   rank: int, epoch: int, batches: Iterable[ray.ObjectRef]):
-    """
-    Batch consumer that will be provided to the shuffler.
-    """
-    queue_idx = epoch * num_trainers + rank
-    if batches is None:
-        queue.put(queue_idx, None)
-    else:
-        queue.put_batch(queue_idx, batches)
+class BatchConsumerQueue(BatchConsumer):
+    def __init__(self, batch_queue: BatchQueue):
+        self._batch_queue = batch_queue
 
+    def consume(self, rank: int, epoch: int, batches: List[ray.ObjectRef]):
+        self._batch_queue.put_batch(rank, epoch, batches)
 
-def debug_batch_consumer(rank: int, epoch: int,
-                         batches: Iterable[pd.DataFrame]):
-    num_batches = len(batches) if batches is not None else 0
-    print(f"Received {num_batches} batches in consumer {rank}.")
+    def producer_done(self, rank: int, epoch: int):
+        self._batch_queue.producer_done(rank, epoch)
+
+    def wait_until_ready(self, epoch: int):
+        self._batch_queue.new_epoch(epoch)
+
+    def wait_until_all_epochs_done(self):
+        self._batch_queue.wait_until_all_epochs_done()
 
 
 if __name__ == "__main__":

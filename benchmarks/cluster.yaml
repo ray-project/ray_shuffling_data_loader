@@ -143,7 +143,8 @@ initialization_commands: []
 setup_commands:
     # - sudo apt-get install -y google-perftools libgoogle-perftools-dev
     # - pip install -U --user https://s3-us-west-2.amazonaws.com/ray-wheels/master/566dcea56aedf0d920f94410faaff58d66c50370/ray-2.0.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
-    - pip install -U --user https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-2.0.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
+    # - pip install -U --user https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-2.0.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
+    - pip install -U --user https://s3-us-west-2.amazonaws.com/ray-wheels/master/c1b7d6f115d79e3dd36cc902152a69b3ae4ce512/ray-2.0.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
     - pip install git+https://github.com/ray-project/ray_shuffling_data_loader.git@main#egg=ray_shuffling_data_loader
     - pip install -U --user numpy pandas pyarrow fastparquet smart-open[s3]
     - if ! sudo mountpoint -q /mnt/disk0; then sudo mkfs -t ext4 /dev/nvme0n1 && sudo mkdir -p /mnt/disk0 && sudo mount /dev/nvme0n1 /mnt/disk0 && sudo chown -R ubuntu:ubuntu /mnt/disk0 && sudo chmod 777 /mnt/disk0; fi
