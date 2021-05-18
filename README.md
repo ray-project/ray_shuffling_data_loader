@@ -7,7 +7,7 @@ A Ray-based data loader with per-epoch shuffling and configurable pipelining, fo
 You can install latest master via:
 
 ```bash
-pip install git+ssh://github.com/ray-project/ray_shuffling_data_loader.git@main#egg=ray_shuffling_data_loader
+pip install git+https://github.com/ray-project/ray_shuffling_data_loader.git@main#egg=ray_shuffling_data_loader
 ```
 
 # Usage
