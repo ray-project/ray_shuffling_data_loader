@@ -61,9 +61,8 @@ parser.add_argument("--gradient-predivide-factor", type=float, default=1.0,
                     help=(
                         "apply gradient predivide factor in optimizer "
                         "(default: 1.0)"))
-parser.add_argument("--num-hosts", type=int, default=4)
-parser.add_argument("--num-slots", type=int, default=4)
-parser.add_argument("--cpus-per-slot", type=int, default=2)
+parser.add_argument("--num-workers", type=int, default=4)
+parser.add_argument("--cpus-per-worker", type=int, default=2)
 parser.add_argument("--mock-train-step-time", type=float, default=1.0)
 
 # Synthetic training data generation settings.
@@ -270,16 +269,14 @@ if __name__ == "__main__":
         f"{human_readable_size(num_bytes)}.")
 
     print("Create Ray executor")
-    num_hosts = args.num_hosts
-    num_slots = args.num_slots
-    cpus_per_slot = args.cpus_per_slot
+    num_workers = args.num_workers
+    cpus_per_worker = args.cpus_per_worker
     settings = RayExecutor.create_settings(timeout_s=30)
     executor = RayExecutor(
         settings,
-        num_hosts=num_hosts,
-        num_slots=num_slots,
+        num_workers=num_workers,
         use_gpu=True,
-        cpus_per_slot=cpus_per_slot)
+        cpus_per_worker=cpus_per_worker)
     executor.start()
     executor.run(train_main, args=[args, filenames])
     executor.shutdown()
