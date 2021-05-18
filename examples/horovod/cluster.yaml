@@ -78,8 +78,7 @@ file_mounts: {
 
 setup_commands:
     - pip install -q boto3 tqdm torch torchvision tensorboard
-    # - pip install -U https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-2.0.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
-    - pip install -U ray
+    - pip install -U https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-2.0.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
     - pip install git+https://github.com/ray-project/ray_shuffling_data_loader.git@main#egg=ray_shuffling_data_loader
     # - docker pull richardliaw/horovod
     # - pip install ray[tune]
