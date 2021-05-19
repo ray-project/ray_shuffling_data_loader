@@ -245,7 +245,7 @@ class TrialStatsCollector_:
         return TrialStats(epoch_stats, self._duration)
 
 
-TrialStatsCollector = ray.remote(TrialStatsCollector_).options(placement_group=None)
+TrialStatsCollector = ray.remote(TrialStatsCollector_)
 
 #
 # Stats processing utilities.
