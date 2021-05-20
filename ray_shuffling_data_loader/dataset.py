@@ -57,7 +57,6 @@ class ShufflingDataset:
                 num_epochs * num_trainers,
                 max_batch_queue_size,
                 name=MULTIQUEUE_ACTOR_NAME,
-                actor_options={"placement_group": None},
                 connect=False)
             # Wait until actor has been created.
             self._batch_queue.size(0)
