@@ -57,15 +57,13 @@ class ShufflingDataset:
                 num_epochs * num_trainers,
                 max_batch_queue_size,
                 name=MULTIQUEUE_ACTOR_NAME,
-                actor_options={"placement_group": None},
                 connect=False)
             # Wait until actor has been created.
             self._batch_queue.size(0)
             # Kick off shuffle.
             # TODO(Clark): Move the shuffle kickoff to an init() method so the
             # user can better control when the shuffling starts?
-            remote_shuffle = ray.remote(shuffle).options(placement_group=None)
-            self._shuffle_result = remote_shuffle.remote(
+            self._shuffle_result = ray.remote(shuffle).remote(
                 filenames,
                 functools.partial(batch_consumer, self._batch_queue,
                                   batch_size, num_trainers),
