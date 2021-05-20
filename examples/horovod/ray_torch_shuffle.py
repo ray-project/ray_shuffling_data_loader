@@ -1,3 +1,5 @@
+import os
+import pickle
 import time
 import timeit
 
@@ -7,13 +9,13 @@ import torch.optim as optim
 
 import numpy as np
 import torch
+import tempfile
 import horovod.torch as hvd
 from horovod.ray import RayExecutor
 
-from ray_shuffling_data_loader.torch_dataset import (
-    TorchShufflingDataset)
-from ray_shuffling_data_loader.data_generation import (
-    generate_data, DATA_SPEC)
+from ray_shuffling_data_loader.torch_dataset import (TorchShufflingDataset)
+from ray_shuffling_data_loader.data_generation import (generate_data,
+                                                       DATA_SPEC)
 
 import argparse
 
@@ -35,38 +37,77 @@ numpy_to_torch_dtype = {
 
 # Training settings
 parser = argparse.ArgumentParser(description="PyTorch MNIST Example")
-parser.add_argument("--batch-size", type=int, default=250000, metavar="N",
-                    help="input batch size for training (default: 64)")
-parser.add_argument("--test-batch-size", type=int, default=250000, metavar="N",
-                    help="input batch size for testing (default: 1000)")
-parser.add_argument("--epochs", type=int, default=10, metavar="N",
-                    help="number of epochs to train (default: 10)")
-parser.add_argument("--lr", type=float, default=0.01, metavar="LR",
-                    help="learning rate (default: 0.01)")
-parser.add_argument("--momentum", type=float, default=0.5, metavar="M",
-                    help="SGD momentum (default: 0.5)")
-parser.add_argument("--no-cuda", action="store_true", default=False,
-                    help="disables CUDA training")
-parser.add_argument("--seed", type=int, default=42, metavar="S",
-                    help="random seed (default: 42)")
-parser.add_argument("--log-interval", type=int, default=10, metavar="N",
-                    help=(
-                        "how many batches to wait before logging training "
-                        "status"))
-parser.add_argument("--fp16-allreduce", action="store_true", default=False,
-                    help="use fp16 compression during allreduce")
-parser.add_argument("--use-adasum", action="store_true", default=False,
-                    help="use adasum algorithm to do reduction")
-parser.add_argument("--gradient-predivide-factor", type=float, default=1.0,
-                    help=(
-                        "apply gradient predivide factor in optimizer "
-                        "(default: 1.0)"))
+parser.add_argument(
+    "--batch-size",
+    type=int,
+    default=250000,
+    metavar="N",
+    help="input batch size for training (default: 64)")
+parser.add_argument(
+    "--test-batch-size",
+    type=int,
+    default=250000,
+    metavar="N",
+    help="input batch size for testing (default: 1000)")
+parser.add_argument(
+    "--epochs",
+    type=int,
+    default=10,
+    metavar="N",
+    help="number of epochs to train (default: 10)")
+parser.add_argument(
+    "--lr",
+    type=float,
+    default=0.01,
+    metavar="LR",
+    help="learning rate (default: 0.01)")
+parser.add_argument(
+    "--momentum",
+    type=float,
+    default=0.5,
+    metavar="M",
+    help="SGD momentum (default: 0.5)")
+parser.add_argument(
+    "--no-cuda",
+    action="store_true",
+    default=False,
+    help="disables CUDA training")
+parser.add_argument(
+    "--seed",
+    type=int,
+    default=42,
+    metavar="S",
+    help="random seed (default: 42)")
+parser.add_argument(
+    "--log-interval",
+    type=int,
+    default=10,
+    metavar="N",
+    help=("how many batches to wait before logging training "
+          "status"))
+parser.add_argument(
+    "--fp16-allreduce",
+    action="store_true",
+    default=False,
+    help="use fp16 compression during allreduce")
+parser.add_argument(
+    "--use-adasum",
+    action="store_true",
+    default=False,
+    help="use adasum algorithm to do reduction")
+parser.add_argument(
+    "--gradient-predivide-factor",
+    type=float,
+    default=1.0,
+    help=("apply gradient predivide factor in optimizer "
+          "(default: 1.0)"))
 parser.add_argument("--num-workers", type=int, default=4)
 parser.add_argument("--cpus-per-worker", type=int, default=2)
 parser.add_argument("--mock-train-step-time", type=float, default=1.0)
 
 # Synthetic training data generation settings.
-parser.add_argument("--num-rows", type=int, default=2 * (10**8))
+parser.add_argument("--cache-files", action="store_true", default=False)
+parser.add_argument("--num-rows", type=int, default=2 * (10**7))
 parser.add_argument("--num-files", type=int, default=25)
 parser.add_argument("--max-row-group-skew", type=float, default=0.0)
 parser.add_argument("--num-row-groups-per-file", type=int, default=5)
@@ -130,20 +171,21 @@ def train_main(args, filenames):
             lr_scaler = hvd.local_size()
 
     # Horovod: scale learning rate by lr_scaler.
-    optimizer = optim.SGD(model.parameters(), lr=args.lr * lr_scaler,
-                          momentum=args.momentum)
+    optimizer = optim.SGD(
+        model.parameters(), lr=args.lr * lr_scaler, momentum=args.momentum)
 
     # Horovod: broadcast parameters & optimizer state.
     hvd.broadcast_parameters(model.state_dict(), root_rank=0)
     hvd.broadcast_optimizer_state(optimizer, root_rank=0)
 
     # Horovod: (optional) compression algorithm.
-    compression = (
-        hvd.Compression.fp16 if args.fp16_allreduce else hvd.Compression.none)
+    compression = (hvd.Compression.fp16
+                   if args.fp16_allreduce else hvd.Compression.none)
 
     # Horovod: wrap optimizer with DistributedOptimizer.
     optimizer = hvd.DistributedOptimizer(
-        optimizer, named_parameters=model.named_parameters(),
+        optimizer,
+        named_parameters=model.named_parameters(),
         compression=compression,
         op=hvd.Adasum if args.use_adasum else hvd.Average,
         gradient_predivide_factor=args.gradient_predivide_factor)
@@ -178,12 +220,10 @@ def train_main(args, filenames):
         std_batch_wait_time = np.std(batch_wait_times)
         max_batch_wait_time = np.max(batch_wait_times)
         min_batch_wait_time = np.min(batch_wait_times)
-        print(
-            f"\nEpoch {epoch}, worker {rank} stats over "
-            f"{len(batch_wait_times)} steps: {epoch_duration:.3f}")
-        print(
-            f"Mean batch wait time: {avg_batch_wait_time:.3f}s +- "
-            f"{std_batch_wait_time}")
+        print(f"\nEpoch {epoch}, worker {rank} stats over "
+              f"{len(batch_wait_times)} steps: {epoch_duration:.3f}")
+        print(f"Mean batch wait time: {avg_batch_wait_time:.3f}s +- "
+              f"{std_batch_wait_time}")
         print(f"Max batch wait time: {max_batch_wait_time:.3f}s")
         print(f"Min batch wait time: {min_batch_wait_time:.3f}s")
         return batch_wait_times
@@ -200,9 +240,8 @@ def train_main(args, filenames):
     max_batch_wait_time = np.max(batch_wait_times)
     min_batch_wait_time = np.min(batch_wait_times)
     print(f"\nWorker {rank} training stats over {args.epochs} epochs:")
-    print(
-        f"Mean batch wait time: {avg_batch_wait_time:.3f}s +- "
-        f"{std_batch_wait_time}")
+    print(f"Mean batch wait time: {avg_batch_wait_time:.3f}s +- "
+          f"{std_batch_wait_time}")
     print(f"Max batch wait time: {max_batch_wait_time:.3f}s")
     print(f"Min batch wait time: {min_batch_wait_time:.3f}s")
     # TODO(Clark): Add logic to the dataset abstraction so we don't have to do
@@ -213,21 +252,15 @@ def train_main(args, filenames):
         print("Done waiting in rank 0 worker.")
 
 
-def create_dataset(
-        filenames,
-        *,
-        batch_size,
-        rank,
-        num_epochs,
-        world_size,
-        num_reducers,
-        max_concurrent_epochs):
+def create_dataset(filenames, *, batch_size, rank, num_epochs, world_size,
+                   num_reducers, max_concurrent_epochs):
     print(f"Creating Torch shuffling dataset for worker {rank} with "
           f"{batch_size} batch size, {num_epochs} epochs, {num_reducers} "
           f"reducers, and {world_size} trainers.")
     feature_columns = list(DATA_SPEC.keys())
     feature_types = [
-        numpy_to_torch_dtype[dtype] for _, _, dtype in DATA_SPEC.values()]
+        numpy_to_torch_dtype[dtype] for _, _, dtype in DATA_SPEC.values()
+    ]
     label_column = feature_columns.pop()
     label_type = feature_types.pop()
     return TorchShufflingDataset(
@@ -256,17 +289,31 @@ if __name__ == "__main__":
     num_row_groups_per_file = args.num_row_groups_per_file
     max_row_group_skew = args.max_row_group_skew
     data_dir = args.data_dir
-    print(
-        f"Generating {num_rows} rows over {num_files} files, with "
-        f"{num_row_groups_per_file} row groups per file and at most "
-        f"{100 * max_row_group_skew:.1f}% row group skew.")
-    filenames, num_bytes = generate_data(
-        num_rows, num_files, num_row_groups_per_file, max_row_group_skew,
-        data_dir)
-    print(
-        f"Generated {len(filenames)} files containing {num_rows} rows "
-        f"with {num_row_groups_per_file} row groups per file, totalling "
-        f"{human_readable_size(num_bytes)}.")
+
+    cache_path = os.path.join(tempfile.gettempdir(), "data_cache")
+    filenames = None
+    if args.cache_files and os.path.exists(cache_path):
+        try:
+            with open(cache_path, "rb") as f:
+                filenames, num_bytes = pickle.load(f)
+        except Exception as exc:
+            print(f"Cache load failed - {exc}")
+
+    if not filenames:
+
+        print(f"Generating {num_rows} rows over {num_files} files, with "
+              f"{num_row_groups_per_file} row groups per file and at most "
+              f"{100 * max_row_group_skew:.1f}% row group skew.")
+        filenames, num_bytes = generate_data(num_rows, num_files,
+                                             num_row_groups_per_file,
+                                             max_row_group_skew, data_dir)
+        if args.cache_files:
+            with open(os.path.join(tempfile.gettempdir(), "data_cache"),
+                      "wb") as f:
+                pickle.dump((filenames, num_bytes), f)
+    print(f"Generated {len(filenames)} files containing {num_rows} rows "
+          f"with {num_row_groups_per_file} row groups per file, totalling "
+          f"{human_readable_size(num_bytes)}.")
 
     print("Create Ray executor")
     num_workers = args.num_workers
