@@ -81,9 +81,8 @@ def shuffle(filenames: List[str],
             max_concurrent_epochs: int,
             collect_stats: bool = True) -> Union[TrialStats, float]:
     if collect_stats:
-        stats_collector = TrialStatsCollector.options(
-            placement_group=None).remote(num_epochs, len(filenames),
-                                         num_reducers, num_trainers)
+        stats_collector = TrialStatsCollector.remote(
+            num_epochs, len(filenames), num_reducers, num_trainers)
     else:
         stats_collector = None
 
@@ -167,7 +166,7 @@ def shuffle_epoch(
     reducers_partitions = []
     for filename in filenames:
         file_reducer_parts = shuffle_map.options(
-            num_returns=num_reducers, placement_group=None).remote(
+            num_returns=num_reducers).remote(
                 filename, num_reducers, stats_collector, epoch)
         if not isinstance(file_reducer_parts, list):
             file_reducer_parts = [file_reducer_parts]
@@ -176,7 +175,7 @@ def shuffle_epoch(
     shuffled = []
     for reducer_idx, reducer_partitions in enumerate(
             zip(*reducers_partitions)):
-        consumer_batches = shuffle_reduce.options(placement_group=None).remote(
+        consumer_batches = shuffle_reduce.remote(
             reducer_idx, stats_collector, epoch, *reducer_partitions)
         shuffled.append(consumer_batches)
     for trainer_idx, batches in enumerate(

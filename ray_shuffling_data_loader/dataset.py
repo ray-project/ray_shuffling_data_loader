@@ -64,8 +64,7 @@ class ShufflingDataset:
             # Kick off shuffle.
             # TODO(Clark): Move the shuffle kickoff to an init() method so the
             # user can better control when the shuffling starts?
-            remote_shuffle = ray.remote(shuffle).options(placement_group=None)
-            self._shuffle_result = remote_shuffle.remote(
+            self._shuffle_result = ray.remote(shuffle).remote(
                 filenames,
                 functools.partial(batch_consumer, self._batch_queue,
                                   batch_size, num_trainers),
