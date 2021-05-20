@@ -81,7 +81,7 @@ def shuffle(filenames: List[str],
             max_concurrent_epochs: int,
             collect_stats: bool = True) -> Union[TrialStats, float]:
     if collect_stats:
-        stats_collector = TrialStatsCollector.remote(
+        stats_collector = TrialStatsCollector.options(placement_group=None).remote(
             num_epochs, len(filenames), num_reducers, num_trainers)
     else:
         stats_collector = None
