@@ -7,8 +7,8 @@ import numpy as np
 from smart_open import open
 
 import ray
-from ray_shuffling_data_loader.stats import (
-    TrialStatsCollector, collect_store_stats, TrialStats)
+from ray_shuffling_data_loader.stats import (TrialStatsCollector,
+                                             collect_store_stats, TrialStats)
 
 #
 # In-memory shuffling, loads data from disk once per epoch.
@@ -73,17 +73,17 @@ def shuffle_no_stats(
     return duration, None
 
 
-def shuffle(
-        filenames: List[str],
-        batch_consumer: Callable[[int, int, Iterable[pd.DataFrame]], None],
-        num_epochs: int,
-        num_reducers: int,
-        num_trainers: int,
-        max_concurrent_epochs: int,
-        collect_stats: bool = True) -> Union[TrialStats, float]:
+def shuffle(filenames: List[str],
+            batch_consumer: Callable[[int, int, Iterable[pd.DataFrame]], None],
+            num_epochs: int,
+            num_reducers: int,
+            num_trainers: int,
+            max_concurrent_epochs: int,
+            collect_stats: bool = True) -> Union[TrialStats, float]:
     if collect_stats:
-        stats_collector = TrialStatsCollector.options(placement_group=None).remote(
-            num_epochs, len(filenames), num_reducers, num_trainers)
+        stats_collector = TrialStatsCollector.options(
+            placement_group=None).remote(num_epochs, len(filenames),
+                                         num_reducers, num_trainers)
     else:
         stats_collector = None
 
@@ -136,9 +136,9 @@ def shuffle(
                     epoch_idx,
                     timeit.default_timer() - start_throttle)
 
-        epoch_reducers = shuffle_epoch(
-            epoch_idx, filenames, batch_consumer, num_reducers, num_trainers,
-            start, stats_collector)
+        epoch_reducers = shuffle_epoch(epoch_idx, filenames, batch_consumer,
+                                       num_reducers, num_trainers, start,
+                                       stats_collector)
         in_progress.extend(epoch_reducers)
 
     # Block until all epochs are done.
@@ -167,8 +167,8 @@ def shuffle_epoch(
     reducers_partitions = []
     for filename in filenames:
         file_reducer_parts = shuffle_map.options(
-            num_returns=num_reducers).remote(filename, num_reducers,
-                                             stats_collector, epoch)
+            num_returns=num_reducers, placement_group=None).remote(
+                filename, num_reducers, stats_collector, epoch)
         if not isinstance(file_reducer_parts, list):
             file_reducer_parts = [file_reducer_parts]
         reducers_partitions.append(file_reducer_parts)
@@ -176,8 +176,8 @@ def shuffle_epoch(
     shuffled = []
     for reducer_idx, reducer_partitions in enumerate(
             zip(*reducers_partitions)):
-        consumer_batches = shuffle_reduce.remote(reducer_idx, stats_collector,
-                                                 epoch, *reducer_partitions)
+        consumer_batches = shuffle_reduce.options(placement_group=None).remote(
+            reducer_idx, stats_collector, epoch, *reducer_partitions)
         shuffled.append(consumer_batches)
     for trainer_idx, batches in enumerate(
             np.array_split(shuffled, num_trainers)):
