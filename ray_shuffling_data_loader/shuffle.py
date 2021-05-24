@@ -4,7 +4,6 @@ from typing import Callable, List, Iterable, Union
 
 import pandas as pd
 import numpy as np
-from smart_open import open
 
 import ray
 from ray_shuffling_data_loader.stats import (TrialStatsCollector,
@@ -196,7 +195,7 @@ def shuffle_map(filename: str, num_reducers: int,
         stats_collector.map_start.remote(epoch)
     start = timeit.default_timer()
     # Load file.
-    rows = pd.read_parquet(open(filename, "rb"))
+    rows = pd.read_parquet(filename)
     assert len(rows) > num_reducers
     end_read = timeit.default_timer()
 

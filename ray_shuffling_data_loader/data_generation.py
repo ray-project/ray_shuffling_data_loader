@@ -2,7 +2,6 @@ import os
 
 import pandas as pd
 import numpy as np
-from smart_open import open
 
 import ray
 
@@ -48,7 +47,7 @@ def generate_file(file_index, global_row_index, num_rows_in_file,
     filename = os.path.join(data_dir,
                             f"input_data_{file_index}.parquet.snappy")
     df.to_parquet(
-        open(filename, "wb"),
+        filename,
         engine="pyarrow",
         compression="snappy",
         row_group_size=num_rows_in_file // num_row_groups_per_file)

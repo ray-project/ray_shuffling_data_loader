@@ -6,8 +6,8 @@ import os
 from typing import List
 import timeit
 
+import fsspec
 import numpy as np
-from smart_open import open
 
 import ray
 
@@ -301,7 +301,7 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
                     or os.path.getsize(filename) == 0)
     print(f"Writing out trial stats to {filename}.")
     # TODO(Clark): Add throttling stats to benchmark stats.
-    with open(filename, write_mode) as f:
+    with fsspec.open(filename, mode=write_mode) as f:
         fieldnames = [
             "num_files",
             "num_row_groups_per_file",
@@ -464,7 +464,7 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
         write_header = (overwrite_stats or not os.path.exists(filename)
                         or os.path.getsize(filename) == 0)
         print(f"Writing out epoch stats to {filename}.")
-        with open(filename, write_mode) as f:
+        with fsspec.open(filename, mode=write_mode) as f:
             fieldnames = [
                 "num_files",
                 "num_row_groups_per_file",
