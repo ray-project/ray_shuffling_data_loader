@@ -15,7 +15,7 @@ setup(
         "ray",
         "numpy",
         "pandas",
-        "smart-open",
+        "fsspec",
         "torch",
     ],
     packages=find_packages(),
