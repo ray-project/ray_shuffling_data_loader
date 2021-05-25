@@ -13,11 +13,30 @@ from ray_shuffling_data_loader.stats import (
 
 from ray_shuffling_data_loader.data_generation import generate_data
 
+from ray.util.placement_group import placement_group
+import time
+
 DEFAULT_DATA_DIR = "/mnt/disk0/benchmark_scratch"
 DEFAULT_STATS_DIR = "./results"
 
 DEFAULT_UTILIZATION_SAMPLE_PERIOD = 5.0
 
+
+@ray.remote(num_cpus=0)
+class Sink:
+    def __init__(self, consumer_idx):
+        self.timestamps = {}
+        self.consumer_idx = consumer_idx
+
+    def consume(self, batch):
+        self.timestamps[time.time()] = len(batch)
+        print(self.consumer_idx, self.timestamps)
+
+    def ping(self):
+        self.timestamps[time.time()] = 0
+
+    def collect_stats(self):
+        return self.timestamps
 
 def dummy_batch_consumer(consumer_idx, epoch, batches):
     pass
@@ -41,11 +60,21 @@ def run_trials(num_epochs,
     else:
         shuffle = shuffle_no_stats
     all_stats = []
+
+    pg = placement_group([{'resources': 1} for _ in range(num_trainers)], strategy="SPREAD")
+    ray.get(pg.ready())
+    sinks = [Sink.options(placement_group=pg).remote(i) for i in range(num_trainers)]
+    ray.get([sink.ping.remote() for sink in sinks])
+    def batch_consumer(i, epoch, batches):
+        if batches:
+            for batch in batches:
+                sinks[i].consume.remote(batch)
+
     if num_trials is not None:
         for trial in range(num_trials):
             print(f"Starting trial {trial}.")
             stats, store_stats = shuffle(
-                filenames, dummy_batch_consumer, num_epochs, num_reducers,
+                filenames, batch_consumer, num_epochs, num_reducers,
                 num_trainers, max_concurrent_epochs, utilization_sample_period)
             duration = stats.duration if collect_stats else stats
             print(f"Trial {trial} done after {duration} seconds.")
@@ -56,7 +85,7 @@ def run_trials(num_epochs,
         while timeit.default_timer() - start < trials_timeout:
             print(f"Starting trial {trial}.")
             stats, store_stats = shuffle(
-                filenames, dummy_batch_consumer, num_epochs, num_reducers,
+                filenames, batch_consumer, num_epochs, num_reducers,
                 num_trainers, max_concurrent_epochs, utilization_sample_period)
             duration = stats.duration if collect_stats else stats
             print(f"Trial {trial} done after {duration} seconds.")
@@ -65,6 +94,15 @@ def run_trials(num_epochs,
     else:
         raise ValueError(
             "One of num_trials and trials_timeout must be specified")
+
+    with open('output.csv', 'a') as f:
+        import csv
+        writer = csv.writer(f)
+        for i, sink in enumerate(sinks):
+            records = ray.get(sink.collect_stats.remote())
+            for timestamp, num_records in records.items():
+                writer.writerow([i, timestamp, num_records])
+
     return all_stats
 
 
