@@ -132,6 +132,7 @@ class ShufflingDataset:
                     # batches.
                     self._batch_queue.task_done(
                         self._rank, self._epoch, outstanding_items)
+                # Get a batch of batches from the queue.
                 for batch in self._batch_queue.get_batch(
                         self._rank, self._epoch):
                     if batch is None:
@@ -142,6 +143,8 @@ class ShufflingDataset:
                         pending.append(batch)
                 outstanding_items = len(pending) + is_done
                 if not pending:
+                    # This can happen if the only item in the queue was the
+                    # done signal, None.
                     continue
 
             # This ray.wait() also serves as our prefetching method, where pull
@@ -150,6 +153,9 @@ class ShufflingDataset:
                 pending, num_returns=1, fetch_local=True)
             # Fetch the underlying dataframe.
             df = ray.get(ready[0])
+
+            # Don't hold on to object refs for any longer than we need to.
+            del ready
 
             # Get first-slice offset into current dataframe.
             df_buffer_len = len(df_buffer) if df_buffer is not None else 0
