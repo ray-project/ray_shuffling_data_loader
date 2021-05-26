@@ -118,12 +118,38 @@ class ShufflingDataset:
 
         # Batch leftover buffer.
         df_buffer = None
+        is_done = False
+        pending = []
+        outstanding_items = 0
         while True:
-            batches = self._batch_queue.get(
-                self._rank, self._epoch, block=True)
-            if batches is None:
-                break
-            df = ray.get(batches)
+            if not pending:
+                if is_done:
+                    # No more items in pending and is_done flag is set, so
+                    # there are no more queue items to consume.
+                    break
+                if outstanding_items > 0:
+                    # Signal to the queue that we're done processing these GPU
+                    # batches.
+                    self._batch_queue.task_done(
+                        self._rank, self._epoch, outstanding_items)
+                for batch in self._batch_queue.get_batch(
+                        self._rank, self._epoch):
+                    if batch is None:
+                        # Set done flag but don't break yet, since we might
+                        # still have more items in pending to consume.
+                        is_done = True
+                    else:
+                        pending.append(batch)
+                outstanding_items = len(pending) + is_done
+                if not pending:
+                    continue
+
+            # This ray.wait() also serves as our prefetching method, where pull
+            # requests for all objects in pending will be made at this time.
+            ready, pending = ray.wait(
+                pending, num_returns=1, fetch_local=True)
+            # Fetch the underlying dataframe.
+            df = ray.get(ready[0])
 
             # Get first-slice offset into current dataframe.
             df_buffer_len = len(df_buffer) if df_buffer is not None else 0
@@ -148,14 +174,12 @@ class ShufflingDataset:
             pos += self._batch_size
             if pos < len(df):
                 df_buffer = df[pos:]
-            # Signal to the queue that we're done processing these GPU batches.
-            self._batch_queue.task_done(self._rank, self._epoch)
         # Yield leftover (incomplete) batch if we're not dropping incomplete
         # batches.
         if df_buffer is not None and not self._drop_last:
             yield df_buffer
         # Signal to the queue that we're done processing the last GPU batch.
-        self._batch_queue.task_done(self._rank, self._epoch)
+        self._batch_queue.task_done(self._rank, self._epoch, outstanding_items)
         self._last_epoch = self._epoch
         if (self._epoch == self._num_epochs - 1
                 and self._shuffle_result is not None):

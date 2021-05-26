@@ -248,6 +248,9 @@ class BatchQueue:
             else:
                 return await self.actor.get.remote(rank, epoch, timeout)
 
+    def get_batch(self, rank: int, epoch: int) -> Any:
+        return ray.get(self.actor.get_batch.remote(rank, epoch))
+
     def put_nowait(self, rank: int, epoch: int, item: Any) -> None:
         """Equivalent to put(item, block=False).
 
@@ -276,23 +279,24 @@ class BatchQueue:
         return self.get(rank, epoch, block=False)
 
     def get_nowait_batch(
-            self, rank: int, epoch: int, num_items: int) -> List[Any]:
+            self, rank: int, epoch: int, num_items: int = None) -> List[Any]:
         """Gets items from the queue and returns them in a
         list in order.
 
         Raises:
             Empty: if the queue does not contain the desired number of items
         """
-        if not isinstance(num_items, int):
-            raise TypeError("Argument 'num_items' must be an int")
-        if num_items < 0:
-            raise ValueError("'num_items' must be nonnegative")
+        if num_items is not None:
+            if not isinstance(num_items, int):
+                raise TypeError("Argument 'num_items' must be an int")
+            if num_items < 0:
+                raise ValueError("'num_items' must be nonnegative")
 
         return ray.get(
             self.actor.get_nowait_batch.remote(rank, epoch, num_items))
 
-    def task_done(self, rank: int, epoch: int):
-        self.actor.task_done.remote(rank, epoch)
+    def task_done(self, rank: int, epoch: int, num_items: int = 1):
+        self.actor.task_done.remote(rank, epoch, num_items)
 
     def ready(self):
         ray.get(self.actor.ready.remote())
@@ -425,12 +429,21 @@ class _QueueActor:
             except asyncio.TimeoutError:
                 raise Full
 
-    async def get(self, rank, epoch: int, timeout=None):
+    async def get(self, rank: int, epoch: int, timeout=None):
         try:
             return await asyncio.wait_for(self.queues[epoch][rank].get(),
                                           timeout)
         except asyncio.TimeoutError:
             raise Empty
+
+    async def get_batch(self, rank: int, epoch: int):
+        batch = [await self.queues[epoch][rank].get()]
+        while True:
+            try:
+                batch.append(self.queues[epoch][rank].get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return batch
 
     def put_nowait(self, rank: int, epoch: int, item):
         self.queues[epoch][rank].put_nowait(item)
@@ -438,7 +451,7 @@ class _QueueActor:
     def put_nowait_batch(self, rank: int, epoch: int, items):
         # If maxsize is 0, queue is unbounded, so no need to check size.
         if (self.maxsize > 0
-                and len(items) + self.qsize(epoch) > self.maxsize):
+                and len(items) + self.qsize(rank, epoch) > self.maxsize):
             raise Full(f"Cannot add {len(items)} items to queue of size "
                        f"{self.qsize()} and maxsize {self.maxsize}.")
         for item in items:
@@ -447,15 +460,19 @@ class _QueueActor:
     def get_nowait(self, rank: int, epoch: int):
         return self.queues[epoch][rank].get_nowait()
 
-    def get_nowait_batch(self, rank: int, epoch: int, num_items):
-        if num_items > self.qsize(epoch):
+    def get_nowait_batch(self, rank: int, epoch: int, num_items: int = None):
+        if num_items is None:
+            # If num_items isn't specified, get all items in the queue.
+            num_items = self.qsize(rank, epoch)
+        if num_items > self.qsize(rank, epoch):
             raise Empty(f"Cannot get {num_items} items from queue of size "
                         f"{self.qsize()}.")
         return [
             self.queues[epoch][rank].get_nowait() for _ in range(num_items)]
 
-    def task_done(self, rank: int, epoch: int):
-        self.queues[epoch][rank].task_done()
+    def task_done(self, rank: int, epoch: int, num_items: int = 1):
+        for _ in range(num_items):
+            self.queues[epoch][rank].task_done()
 
     def ready(self):
         pass
