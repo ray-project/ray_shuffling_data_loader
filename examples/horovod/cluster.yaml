@@ -12,7 +12,7 @@ max_workers: 3
 # If a node is idle for this many minutes, it will be removed.
 idle_timeout_minutes: 20
 docker:
-    image: richardliaw/horovod
+    image: horovod/horovod-ray:master
     container_name: ray_docker
 
 # Cloud-provider specific configuration.
@@ -44,7 +44,7 @@ head_node:
               - Key: anyscale-user
                 Value: "clark@anyscale.com"
               - Key: anyscale-expiration
-                Value: "2021-05-10"
+                Value: "2021-06-03"
     # InstanceMarketOptions:
     #     MarketType: spot
            # SpotOptions:
@@ -63,7 +63,7 @@ worker_nodes:
               - Key: anyscale-user
                 Value: "clark@anyscale.com"
               - Key: anyscale-expiration
-                Value: "2021-05-10"
+                Value: "2021-06-03"
     # Run workers on spot by default. Comment this out to use on-demand.
     # InstanceMarketOptions:
     #     MarketType: spot
@@ -77,10 +77,9 @@ file_mounts: {
 }
 
 setup_commands:
-    - pip install -q boto3 tqdm torch torchvision tensorboard
-    # - pip install -U https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-2.0.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
-    - pip install -U ray
-    - pip install git+https://github.com/ray-project/ray_shuffling_data_loader.git@main#egg=ray_shuffling_data_loader
+    - pip install boto3 fsspec==2021.05.0 tqdm torch torchvision tensorboard s3fs==2021.05.0 pyarrow
+    - pip install -U https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-2.0.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
+    - pip install -U git+https://github.com/ray-project/ray_shuffling_data_loader.git@feat/consumer-redesign#egg=ray_shuffling_data_loader
     # - docker pull richardliaw/horovod
     # - pip install ray[tune]
     # - cd horovod && git submodule update --init --recursive
