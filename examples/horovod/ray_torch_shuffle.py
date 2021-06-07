@@ -323,6 +323,7 @@ if __name__ == "__main__":
         settings,
         num_workers=num_workers,
         use_gpu=True,
+        gpus_per_worker=1,
         cpus_per_worker=cpus_per_worker)
     executor.start()
     executor.run(train_main, args=[args, filenames])

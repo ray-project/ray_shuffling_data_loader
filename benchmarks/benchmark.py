@@ -1,15 +1,16 @@
 import argparse
+import asyncio
+import collections
 import glob
 import os
 import timeit
+from typing import List
 
 import numpy as np
 
 import ray
 from ray_shuffling_data_loader.shuffle import (
-    shuffle_with_stats, shuffle_no_stats)
-from ray_shuffling_data_loader.dataset import BatchConsumerQueue
-from ray_shuffling_data_loader.batch_queue import BatchQueue
+    shuffle_with_stats, shuffle_no_stats, BatchConsumer)
 from ray_shuffling_data_loader.stats import (
     process_stats, human_readable_size)
 
@@ -20,6 +21,76 @@ DEFAULT_DATA_DIR = "/mnt/disk0/benchmark_scratch"
 DEFAULT_STATS_DIR = "./results"
 
 DEFAULT_UTILIZATION_SAMPLE_PERIOD = 5.0
+
+
+@ray.remote(num_cpus=0)
+class Consumer:
+    def __init__(self, rank, num_epochs, max_concurrent_epochs):
+        self._rank = rank
+        self._consume_timestamps = [{} for _ in range(num_epochs)]
+        self._num_epochs = num_epochs
+        self._max_epochs = max_concurrent_epochs
+        self._curr_epochs = collections.deque()
+        self._epoch_done_evs = [asyncio.Event() for _ in range(num_epochs)]
+
+    async def new_epoch(self, epoch):
+        if len(self._curr_epochs) == self._max_epochs:
+            first_epoch = self._curr_epochs.popleft()
+            await self._epoch_done_evs[first_epoch].wait()
+        self._curr_epochs.append(epoch)
+        self._consume_timestamps[epoch][timeit.default_timer()] = 0
+        print(f"Starting epoch {epoch} on consumer {self._rank}.")
+
+    def consume(self, epoch, batch):
+        self._consume_timestamps[epoch][timeit.default_timer()] = len(batch)
+
+    def producer_done(self, epoch):
+        self._epoch_done_evs[epoch].set()
+        print(f"Epoch {epoch} done on consumer {self._rank}.")
+
+    def get_stats(self):
+        return self._consume_timestamps
+
+    async def wait_until_all_epochs_done(self):
+        await self._epoch_done_evs[self._num_epochs - 1].wait()
+
+    def ready(self):
+        pass
+
+
+class BatchConsumer(BatchConsumer):
+    def __init__(self, num_trainers, num_epochs, pg, max_concurrent_epochs):
+        self._consumers = [
+            Consumer.options(
+                placement_group=pg).remote(
+                    rank, num_epochs, max_concurrent_epochs)
+            for rank in range(num_trainers)]
+
+    def consume(self, rank: int, epoch: int, batches: List[ray.ObjectRef]):
+        if batches is not None:
+            for batch in batches:
+                self._consumers[rank].consume.remote(epoch, batch)
+
+    def producer_done(self, rank: int, epoch: int):
+        self._consumers[rank].producer_done.remote(epoch)
+
+    def wait_until_ready(self, epoch: int):
+        ray.get([
+            consumer.new_epoch.remote(epoch)
+            for consumer in self._consumers])
+
+    def wait_until_all_epochs_done(self):
+        ray.get([
+            consumer.wait_until_all_epochs_done.remote()
+            for consumer in self._consumers])
+
+    def actors_ready(self):
+        ray.get([consumer.ready.remote() for consumer in self._consumers])
+
+    def get_stats(self):
+        return ray.get([
+            consumer.get_stats.remote()
+            for consumer in self._consumers])
 
 
 def run_trials(num_epochs,
@@ -43,17 +114,16 @@ def run_trials(num_epochs,
     if num_trials is not None:
         for trial in range(num_trials):
             print(f"Starting trial {trial}.")
-            batch_queue = BatchQueue(
-                num_epochs,
-                num_trainers,
-                max_concurrent_epochs,
-                maxsize=0,
-                name=BATCHQUEUE_ACTOR_NAME,
-                connect=False,
-                wait_for_trainers=False)
-            batch_consumer = BatchConsumerQueue(batch_queue)
-            # Wait until batch queue actor has been created.
-            batch_queue.ready()
+            pg = ray.util.placement_group(
+                [
+                    {"resources": 1}
+                    for _ in range(num_trainers)],
+                strategy="SPREAD")
+            ray.get(pg.ready())
+            batch_consumer = BatchConsumer(
+                num_trainers, num_epochs, pg, max_concurrent_epochs)
+            # Wait until batch consumer actors have been created.
+            batch_consumer.actors_ready()
             stats, store_stats = shuffle(
                 filenames, batch_consumer, num_epochs, num_reducers,
                 num_trainers, utilization_sample_period)
@@ -65,17 +135,16 @@ def run_trials(num_epochs,
         trial = 0
         while timeit.default_timer() - start < trials_timeout:
             print(f"Starting trial {trial}.")
-            batch_queue = BatchQueue(
-                num_epochs,
-                num_trainers,
-                max_concurrent_epochs,
-                maxsize=0,
-                name=BATCHQUEUE_ACTOR_NAME,
-                connect=False,
-                wait_for_trainers=False)
-            batch_consumer = BatchConsumerQueue(batch_queue)
-            # Wait until batch queue actor has been created.
-            batch_queue.ready()
+            pg = ray.util.placement_group(
+                [
+                    {"resources": 1}
+                    for _ in range(num_trainers)],
+                strategy="SPREAD")
+            ray.get(pg.ready())
+            batch_consumer = BatchConsumer(
+                num_trainers, num_epochs, pg, max_concurrent_epochs)
+            # Wait until batch consumer actors have been created.
+            batch_consumer.actors_ready()
             stats, store_stats = shuffle(
                 filenames, batch_consumer, num_epochs, num_reducers,
                 num_trainers, utilization_sample_period)
