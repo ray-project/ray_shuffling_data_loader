@@ -118,7 +118,9 @@ def shuffle(filenames: List[str],
     start = timeit.default_timer()
     for epoch_idx in range(num_epochs):
         # Wait until consumer is ready for another epoch shuffle to start.
+        print(f"Waiting until ready for epoch {epoch_idx} shuffle.")
         batch_consumer.wait_until_ready(epoch_idx)
+        print(f"Ready for epoch {epoch_idx} shuffle, starting it.")
 
         shuffle_epoch(
             epoch_idx, filenames, batch_consumer, num_reducers, num_trainers,
