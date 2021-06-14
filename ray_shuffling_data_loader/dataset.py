@@ -119,70 +119,68 @@ class ShufflingDataset:
         pending = []
         outstanding_items = 0
         while True:
-            if not pending:
-                if is_done:
-                    # No more items in pending and is_done flag is set, so
-                    # there are no more queue items to consume.
-                    break
-                if outstanding_items > 0:
-                    # Signal to the queue that we're done processing these GPU
-                    # batches.
-                    self._batch_queue.task_done(
-                        self._rank, self._epoch, outstanding_items)
-                # Get a batch of batches from the queue.
-                for batch in self._batch_queue.get_batch(
-                        self._rank, self._epoch):
-                    if batch is None:
-                        # Set done flag but don't break yet, since we might
-                        # still have more items in pending to consume.
-                        is_done = True
-                    else:
-                        pending.append(batch)
-                outstanding_items = len(pending) + is_done
-                if not pending:
-                    # This can happen if the only item in the queue was the
-                    # done signal, None.
-                    continue
+            while pending:
+                # This ray.wait() also serves as our prefetching method, where
+                # pull requests for all objects in pending will be made at this
+                # time.
+                ready, pending = ray.wait(
+                    pending, num_returns=1, fetch_local=True)
+                # Fetch the underlying dataframe.
+                df = ray.get(ready[0])
 
-            # This ray.wait() also serves as our prefetching method, where pull
-            # requests for all objects in pending will be made at this time.
-            ready, pending = ray.wait(
-                pending, num_returns=1, fetch_local=True)
-            # Fetch the underlying dataframe.
-            df = ray.get(ready[0])
+                # Don't hold on to object refs for any longer than we need to.
+                del ready
 
-            # Don't hold on to object refs for any longer than we need to.
-            del ready
+                # Get first-slice offset into current dataframe.
+                df_buffer_len = len(df_buffer) if df_buffer is not None else 0
+                offset = self._batch_size - df_buffer_len
+                # If we already have a leftover batch, concatenate it with a
+                # front-slice of the current dataframe, attempting to create a
+                # full-sized batch.
+                # If we don't already have a leftover batch, we consume the
+                # first batch in the current dataframe here.
+                df_buffer = pd.concat([df_buffer, df[:offset]])
+                # If we have a full-sized batch, yield it. Otherwise, hang on
+                # to it and yield it in a future round, once we have a full
+                # batch.
+                if len(df_buffer) == self._batch_size:
+                    yield df_buffer
+                    df_buffer = None
+                # Yield batches from the current dataframe.
+                pos = offset  # Fallback if offset > len(df).
+                for pos in range(
+                        offset, len(df) - self._batch_size + 1,
+                        self._batch_size):
+                    yield df[pos:pos + self._batch_size]
+                # If leftover (incomplete) batch, save for later.
+                pos += self._batch_size
+                if pos < len(df):
+                    df_buffer = df[pos:]
 
-            # Get first-slice offset into current dataframe.
-            df_buffer_len = len(df_buffer) if df_buffer is not None else 0
-            offset = self._batch_size - df_buffer_len
-            # If we already have a leftover batch, concatenate it with a
-            # front-slice of the current dataframe, attempting to create a
-            # full-sized batch.
-            # If we don't already have a leftover batch, we consume the first
-            # batch in the current dataframe here.
-            df_buffer = pd.concat([df_buffer, df[:offset]])
-            # If we have a full-sized batch, yield it. Otherwise, hang on to
-            # it and yield it in a future round, once we have a full batch.
-            if len(df_buffer) == self._batch_size:
-                yield df_buffer
-                df_buffer = None
-            # Yield batches from the current dataframe.
-            pos = offset  # Fallback if offset > len(df).
-            for pos in range(offset,
-                             len(df) - self._batch_size + 1, self._batch_size):
-                yield df[pos:pos + self._batch_size]
-            # If leftover (incomplete) batch, save for later.
-            pos += self._batch_size
-            if pos < len(df):
-                df_buffer = df[pos:]
+            if outstanding_items > 0:
+                # Signal to the queue that we're done processing these GPU
+                # batches.
+                self._batch_queue.task_done(
+                    self._rank, self._epoch, outstanding_items)
+            if is_done:
+                # No more items in pending and is_done flag is set, so there
+                # are no more queue items to consume.
+                break
+            # Get a batch of batches from the queue.
+            pending = self._batch_queue.get_batch(self._rank, self._epoch)
+            if pending and pending[-1] is None:
+                # Set done flag but don't break yet, since we might still have
+                # more items in pending to consume.
+                is_done = True
+                pending.pop()
+            outstanding_items = len(pending)
+
         # Yield leftover (incomplete) batch if we're not dropping incomplete
         # batches.
         if df_buffer is not None and not self._drop_last:
             yield df_buffer
         # Signal to the queue that we're done processing the last GPU batch.
-        self._batch_queue.task_done(self._rank, self._epoch, outstanding_items)
+        self._batch_queue.task_done(self._rank, self._epoch, 1)
         self._last_epoch = self._epoch
         if (self._epoch == self._num_epochs - 1
                 and self._shuffle_result is not None):
