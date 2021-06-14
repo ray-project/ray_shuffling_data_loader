@@ -116,9 +116,17 @@ class ShufflingDataset:
         # Batch leftover buffer.
         df_buffer = None
         is_done = False
-        pending = []
-        outstanding_items = 0
-        while True:
+        while not is_done:
+            # Get a batch of batches from the queue.
+            pending = self._batch_queue.get_batch(self._rank, self._epoch)
+            if pending and pending[-1] is None:
+                # Set done flag but don't break yet, since we might still have
+                # more items in pending to consume.
+                is_done = True
+                pending.pop()
+            num_outstanding_batches = len(pending)
+
+            # Consume all batches in this batch.
             while pending:
                 # This ray.wait() also serves as our prefetching method, where
                 # pull requests for all objects in pending will be made at this
@@ -156,24 +164,15 @@ class ShufflingDataset:
                 pos += self._batch_size
                 if pos < len(df):
                     df_buffer = df[pos:]
+                # Don't hold on to the dataframe buffer for any longer than we
+                # need to.
+                del df
 
-            if outstanding_items > 0:
+            if num_outstanding_batches > 0:
                 # Signal to the queue that we're done processing these GPU
                 # batches.
                 self._batch_queue.task_done(
-                    self._rank, self._epoch, outstanding_items)
-            if is_done:
-                # No more items in pending and is_done flag is set, so there
-                # are no more queue items to consume.
-                break
-            # Get a batch of batches from the queue.
-            pending = self._batch_queue.get_batch(self._rank, self._epoch)
-            if pending and pending[-1] is None:
-                # Set done flag but don't break yet, since we might still have
-                # more items in pending to consume.
-                is_done = True
-                pending.pop()
-            outstanding_items = len(pending)
+                    self._rank, self._epoch, num_outstanding_batches)
 
         # Yield leftover (incomplete) batch if we're not dropping incomplete
         # batches.
