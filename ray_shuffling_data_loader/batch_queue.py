@@ -391,7 +391,6 @@ class _QueueActor:
     async def producer_done(self, rank: int, epoch: int):
         await self.queues[epoch][rank].put(None)
         self.queue_producer_done[epoch][rank].set()
-        print(f"Producer for trainer {rank} and epoch {epoch} is done.")
 
     async def wait_until_all_epochs_done(self):
         await asyncio.wait([
