@@ -59,7 +59,6 @@ class BatchQueue:
                  maxsize: int = 0,
                  name: str = None,
                  connect: bool = False,
-                 wait_for_trainers: bool = True,
                  actor_options: Optional[Dict] = None,
                  connect_retries: int = 5) -> None:
         if connect:
@@ -73,7 +72,7 @@ class BatchQueue:
             self.actor = ray.remote(_QueueActor).options(
                 **actor_options).remote(
                     max_concurrent_epochs, num_epochs,
-                    num_trainers, maxsize, wait_for_trainers)
+                    num_trainers, maxsize)
 
     def new_epoch(self, epoch: int):
         return ray.get(self.actor.new_epoch.remote(epoch))
@@ -353,8 +352,7 @@ def connect_queue_actor(name, num_retries=5):
 
 class _QueueActor:
     def __init__(
-            self, max_epochs, num_epochs, num_trainers, maxsize,
-            wait_for_trainers=True):
+            self, max_epochs, num_epochs, num_trainers, maxsize):
         self.max_epochs = max_epochs
         self.num_epochs = num_epochs
         self.curr_epochs = collections.deque()
@@ -369,7 +367,6 @@ class _QueueActor:
                 for _ in range(num_trainers)]
             for _ in range(num_epochs)]
         self.maxsize = maxsize
-        self.wait_for_trainers = wait_for_trainers
 
     async def new_epoch(self, epoch: int):
         if len(self.curr_epochs) == self.max_epochs:
@@ -378,11 +375,10 @@ class _QueueActor:
             await asyncio.wait([
                 event.wait()
                 for event in self.queue_producer_done[first_epoch]])
-            if self.wait_for_trainers:
-                # Wait until trainers are done with batches.
-                await asyncio.wait([
-                    queue.join()
-                    for queue in self.queues[first_epoch]])
+            # Wait until trainers are done with batches.
+            await asyncio.wait([
+                queue.join()
+                for queue in self.queues[first_epoch]])
             # TODO(Clark): The queues and events for this epoch should no
             # longer be accessed after this point, so we could set them to
             # None here and save some space.
@@ -396,12 +392,11 @@ class _QueueActor:
         await asyncio.wait([
             event.wait()
             for event in self.queue_producer_done[self.num_epochs - 1]])
-        if self.wait_for_trainers:
-            # With the final epoch producer being done, we're guaranteed that
-            # no more batches will be added to the queue, so we join on the
-            # current queue items.
-            await asyncio.wait([
-                queue.join() for queue in self.queues[self.num_epochs - 1]])
+        # With the final epoch producer being done, we're guaranteed that
+        # no more batches will be added to the queue, so we join on the
+        # current queue items.
+        await asyncio.wait([
+            queue.join() for queue in self.queues[self.num_epochs - 1]])
 
     def size(self):
         return sum(q.qsize() for queues in self.queues for q in queues)

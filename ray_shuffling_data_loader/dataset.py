@@ -40,8 +40,7 @@ class ShufflingDataset:
                  rank: int,
                  drop_last: bool = False,
                  num_reducers: int = None,
-                 max_concurrent_epochs: int = 2,
-                 max_batch_queue_size: int = 0):
+                 max_concurrent_epochs: int = 2):
         if num_reducers is None:
             num_reducers = int(
                 num_trainers * get_num_cpus() * REDUCER_CLUSTER_CORE_SHARE)
@@ -56,7 +55,6 @@ class ShufflingDataset:
                 num_epochs,
                 num_trainers,
                 max_concurrent_epochs,
-                max_batch_queue_size,
                 name=BATCHQUEUE_ACTOR_NAME,
                 connect=False)
             self._consumer = BatchConsumerQueue(self._batch_queue)
@@ -79,7 +77,6 @@ class ShufflingDataset:
                 num_epochs,
                 num_trainers,
                 max_concurrent_epochs,
-                max_batch_queue_size,
                 name=BATCHQUEUE_ACTOR_NAME,
                 connect=True)
             self._shuffle_result = None
