@@ -111,7 +111,7 @@ def shuffle(filenames: List[str],
             collect_stats: bool = True) -> Union[TrialStats, float]:
     if collect_stats:
         stats_collector = TrialStatsCollector.remote(
-            num_epochs, len(filenames), num_reducers, num_trainers)
+            num_epochs, len(filenames), num_reducers)
     else:
         stats_collector = None
 
@@ -159,8 +159,7 @@ def shuffle_epoch(
         shuffled.append(consumer_batches)
     for rank, batches in enumerate(
             np.array_split(shuffled, num_trainers)):
-        consume(rank, batch_consumer, trial_start, stats_collector,
-                epoch, list(batches))
+        consume(rank, batch_consumer, epoch, list(batches))
 
 
 @ray.remote
@@ -210,21 +209,10 @@ def shuffle_reduce(reduce_index: int,
     return batch
 
 
-def consume(rank: int,
-            batch_consumer: BatchConsumer,
-            trial_start: float,
-            stats_collector: Union[TrialStatsCollector, None], epoch: int,
-            batches: List[ray.ObjectRef]) -> None:
-    if stats_collector is not None:
-        stats_collector.consume_start.remote(epoch)
-    start = timeit.default_timer()
-    trial_time_to_consume = start - trial_start
+def consume(
+        rank: int, batch_consumer: BatchConsumer, epoch: int,
+        batches: List[ray.ObjectRef]) -> None:
     batch_consumer.consume(rank, epoch, batches)
     # Signal to batch consumer that we're done producing batches for this
     # epoch.
     batch_consumer.producer_done(rank, epoch)
-    end = timeit.default_timer()
-    duration = end - start
-    if stats_collector is not None:
-        stats_collector.consume_done.remote(epoch, duration,
-                                            trial_time_to_consume)

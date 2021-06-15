@@ -27,29 +27,45 @@ DEFAULT_UTILIZATION_SAMPLE_PERIOD = 5.0
 class Consumer:
     def __init__(self, rank, num_epochs, max_concurrent_epochs):
         self._rank = rank
-        self._consume_timestamps = [{} for _ in range(num_epochs)]
         self._num_epochs = num_epochs
         self._max_epochs = max_concurrent_epochs
         self._curr_epochs = collections.deque()
         self._epoch_done_evs = [asyncio.Event() for _ in range(num_epochs)]
+        # TODO(Clark): Move some of this to the stats collector?
+        self._consume_timestamps = [{} for _ in range(num_epochs)]
+        self._consume_start_times = [None] * num_epochs
+        self._consume_end_times = [None] * num_epochs
+        self._epoch_start_time = [None] * num_epochs
+        self._time_to_consumes = [[] for _ in range(num_epochs)]
 
     async def new_epoch(self, epoch):
         if len(self._curr_epochs) == self._max_epochs:
             first_epoch = self._curr_epochs.popleft()
             await self._epoch_done_evs[first_epoch].wait()
         self._curr_epochs.append(epoch)
-        self._consume_timestamps[epoch][timeit.default_timer()] = 0
+        self._epoch_start_time = timeit.default_timer()
+        self._consume_timestamps[epoch][self._epoch_start_time] = 0
         print(f"Starting epoch {epoch} on consumer {self._rank}.")
 
     def consume(self, epoch, batch):
-        self._consume_timestamps[epoch][timeit.default_timer()] = len(batch)
+        consume_time = timeit.default_timer()
+        if self._consume_start_times[epoch] is None:
+            self._consume_start_times[epoch] = consume_time
+        self._consume_timestamps[epoch][consume_time] = len(batch)
+        self._time_to_consumes[epoch].append(
+            consume_time - self._epoch_start_time)
 
     def producer_done(self, epoch):
+        self._consume_end_times[epoch] = timeit.default_timer()
         self._epoch_done_evs[epoch].set()
         print(f"Epoch {epoch} done on consumer {self._rank}.")
 
     def get_stats(self):
-        return self._consume_timestamps
+        return (
+            self._consume_timestamps,
+            self._time_to_consumes,
+            self._consume_start_times,
+            self._consume_end_times)
 
     async def wait_until_all_epochs_done(self):
         await self._epoch_done_evs[self._num_epochs - 1].wait()
@@ -88,9 +104,18 @@ class BatchConsumer(BatchConsumer):
         ray.get([consumer.ready.remote() for consumer in self._consumers])
 
     def get_stats(self):
-        return ray.get([
-            consumer.get_stats.remote()
-            for consumer in self._consumers])
+        (
+            consume_times, time_to_consumes,
+            consume_start_times, consume_end_times) = tuple(list(
+                zip(*stats_)) for stats_ in zip(
+                    *ray.get([
+                        consumer.get_stats.remote()
+                        for consumer in self._consumers])))
+        consume_stage_durations = []
+        for start_times, end_times in zip(
+                consume_start_times, consume_end_times):
+            consume_stage_durations.append(max(end_times) - min(start_times))
+        return consume_times, time_to_consumes, consume_stage_durations
 
 
 def run_trials(num_epochs,
@@ -129,7 +154,8 @@ def run_trials(num_epochs,
                 num_trainers, utilization_sample_period)
             duration = stats.duration if collect_stats else stats
             print(f"Trial {trial} done after {duration} seconds.")
-            all_stats.append((stats, store_stats))
+            consumer_stats = batch_consumer.get_stats()
+            all_stats.append((stats, consumer_stats, store_stats))
     elif trials_timeout is not None:
         start = timeit.default_timer()
         trial = 0
@@ -150,7 +176,8 @@ def run_trials(num_epochs,
                 num_trainers, utilization_sample_period)
             duration = stats.duration if collect_stats else stats
             print(f"Trial {trial} done after {duration} seconds.")
-            all_stats.append((stats, store_stats))
+            consumer_stats = batch_consumer.get_stats()
+            all_stats.append((stats, consumer_stats, store_stats))
             trial += 1
     else:
         raise ValueError(
@@ -182,7 +209,7 @@ if __name__ == "__main__":
     parser.add_argument("--use-old-data", action="store_true")
     parser.add_argument("--no-stats", action="store_true")
     parser.add_argument("--no-epoch-stats", action="store_true")
-    parser.add_argument("--no-consume-stats", action="store_true")
+    parser.add_argument("--no-consumer-stats", action="store_true")
     parser.add_argument("--overwrite-stats", action="store_true")
     parser.add_argument("--unique-stats", action="store_true")
     args = parser.parse_args()
@@ -217,7 +244,7 @@ if __name__ == "__main__":
         ray.init(address="auto")
     else:
         print("Starting a new local Ray cluster.")
-        ray.init()
+        ray.init(resources={"resources": 100})
 
     num_rows = args.num_rows
     num_row_groups_per_file = args.num_row_groups_per_file
@@ -273,10 +300,10 @@ if __name__ == "__main__":
 
     if collect_stats:
         process_stats(all_stats, args.overwrite_stats, args.stats_dir,
-                      args.no_epoch_stats, args.unique_stats, num_rows,
-                      num_files, num_row_groups_per_file, batch_size,
-                      num_reducers, num_trainers, num_epochs,
-                      max_concurrent_epochs)
+                      args.no_epoch_stats, args.no_consumer_stats,
+                      args.unique_stats, num_rows, num_files,
+                      num_row_groups_per_file, batch_size, num_reducers,
+                      num_trainers, num_epochs, max_concurrent_epochs)
     else:
         print("Shuffle trials done, no detailed stats collected.")
         times, _ = zip(*all_stats)
