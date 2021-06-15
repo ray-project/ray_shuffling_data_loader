@@ -22,7 +22,8 @@ class Full(Exception):
 
 
 class BatchQueue:
-    """A first-in, first-out queue implementation on Ray.
+    """A first-in, first-out queue implementation on Ray, meant to serve as a
+    GPU batch queue between data loaders and distributed training workers.
 
     The behavior and use cases are similar to those of the asyncio.Queue class.
 
@@ -40,16 +41,6 @@ class BatchQueue:
             the QueueActor during creation. These are directly passed into
             QueueActor.options(...). This could be useful if you
             need to pass in custom resource requirements, for example.
-
-    Examples:
-        >>> q = Queue()
-        >>> items = list(range(10))
-        >>> for item in items:
-        >>>     q.put(item)
-        >>> for item in items:
-        >>>     assert item == q.get()
-        >>> # Create Queue with the underlying actor reserving 1 CPU.
-        >>> q = Queue(actor_options={"num_cpus": 1})
     """
 
     def __init__(self,
@@ -74,13 +65,53 @@ class BatchQueue:
                     max_concurrent_epochs, num_epochs,
                     num_trainers, maxsize)
 
+    def ready(self):
+        """
+        Wait until the queue actor is ready.
+        """
+        ray.get(self.actor.ready.remote())
+
     def new_epoch(self, epoch: int):
-        return ray.get(self.actor.new_epoch.remote(epoch))
+        """
+        Prepare the queue for a new epoch, blocking until the queue has
+        capacity for a new epoch (in accordance with the provided
+        max_concurrent_epochs).
+
+        Args:
+            epoch (int): The new epoch.
+        """
+        ray.get(self.actor.new_epoch.remote(epoch))
 
     def producer_done(self, rank: int, epoch: int):
+        """
+        Signal to the queue that the batch producer for the provided epoch
+        and trainer is done. This should be used by the data loader to indicate
+        that the producer is done producing batches.
+
+        Args:
+            rank (int): The rank of the target trainer.
+            epoch (int): The epoch that's done.
+        """
         self.actor.producer_done.remote(rank, epoch)
 
+    def task_done(self, rank: int, epoch: int, num_items: int = 1):
+        """
+        Signal to the queue that num_items batches are done being processed
+        by the given trainer for the provided epoch. This should be used by the
+        trainer to indicate that the consumer is done consuming batches.
+
+        Args:
+            rank (int): The rank of the trainer that's done.
+            epoch (int): The epoch that's done.
+            num_items (int): How many batches are done being processed. Default
+                is 1.
+        """
+        self.actor.task_done.remote(rank, epoch, num_items)
+
     def wait_until_all_epochs_done(self):
+        """
+        Block until all batches for all epochs are done being consumed.
+        """
         ray.get(self.actor.wait_until_all_epochs_done.remote())
 
     def __len__(self) -> int:
@@ -294,12 +325,6 @@ class BatchQueue:
         return ray.get(
             self.actor.get_nowait_batch.remote(rank, epoch, num_items))
 
-    def task_done(self, rank: int, epoch: int, num_items: int = 1):
-        self.actor.task_done.remote(rank, epoch, num_items)
-
-    def ready(self):
-        ray.get(self.actor.ready.remote())
-
     def shutdown(self, force: bool = False, grace_period_s: int = 5) -> None:
         """Terminates the underlying QueueActor.
 
@@ -369,6 +394,16 @@ class _QueueActor:
         self.maxsize = maxsize
 
     async def new_epoch(self, epoch: int):
+        # Before kicking off a shuffle for a new epoch, we need to wait until
+        # we know that no more batches will be added to the queue, and then
+        # wait until all existing batches currently in the queue have been
+        # fully processed by the trainers. The former ensures that we don't
+        # miss any future batches, and is accomplished by waiting for a done
+        # signal from all producers. The latter ensures that we don't consider
+        # the current epoch to be done until trainers are finished processing
+        # all batches for that epoch which provides more sensible backpressure
+        # semantics, and is accomplished by waiting for a done signal from
+        # trainers for all of the current epoch's batches.
         if len(self.curr_epochs) == self.max_epochs:
             first_epoch = self.curr_epochs.popleft()
             # Wait until queue producers for all trainers are done.
