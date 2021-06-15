@@ -55,7 +55,16 @@ def shuffle_with_stats(
         num_epochs: int, num_reducers: int, num_trainers: int,
         utilization_sample_period: float) -> (TrialStats, List):
     """
-    Shuffle the provided dataset every epoch.
+    Shuffle the provided dataset every epoch, with shuffle stats collection.
+
+    Args:
+        filenames (str): Paths to input Parquet files.
+        batch_consumer (BatchConsumer): Consumer of shuffle outputs.
+        num_epochs (int): Number of training epochs.
+        num_reducers (Optional[int]): The number of shuffler reducers.
+        num_trainers (int): Number of trainer workers.
+        utilization_sample_period (float): How often to sample object store
+            utilization (in seconds).
     """
     stats = None
     store_stats = []
@@ -88,9 +97,18 @@ def shuffle_no_stats(
         filenames: List[str],
         batch_consumer: BatchConsumer,
         num_epochs: int, num_reducers: int, num_trainers: int,
-        utilization_sample_period: float) -> (float, None):
+        utilization_sample_period: float = None) -> (float, None):
     """
-    Shuffle the provided dataset every epoch.
+    Shuffle the provided dataset every epoch, without shuffle stats collection.
+
+    Args:
+        filenames (str): Paths to input Parquet files.
+        batch_consumer (BatchConsumer): Consumer of shuffle outputs.
+        num_epochs (int): Number of training epochs.
+        num_reducers (int): The number of shuffler reducers.
+        num_trainers (int): Number of trainer workers.
+        utilization_sample_period (float): How often to sample object store
+            utilization (in seconds).
     """
     print(f"Doing {num_epochs} epochs of shuffling.")
     duration = shuffle(
@@ -109,6 +127,17 @@ def shuffle(filenames: List[str],
             num_reducers: int,
             num_trainers: int,
             collect_stats: bool = True) -> Union[TrialStats, float]:
+    """
+    Shuffle the provided dataset every epoch.
+
+    Args:
+        filenames (str): Paths to input Parquet files.
+        batch_consumer (BatchConsumer): Consumer of shuffle outputs.
+        num_epochs (int): Number of training epochs.
+        num_reducers (int): The number of shuffler reducers.
+        num_trainers (int): Number of trainer workers.
+        collect_stats (bool): Whether to collect shuffle stats.
+    """
     if collect_stats:
         stats_collector = TrialStatsCollector.remote(
             num_epochs, len(filenames), num_reducers)
@@ -122,24 +151,37 @@ def shuffle(filenames: List[str],
 
         shuffle_epoch(
             epoch_idx, filenames, batch_consumer, num_reducers, num_trainers,
-            start, stats_collector)
+            stats_collector)
 
     batch_consumer.wait_until_all_epochs_done()
     end = timeit.default_timer()
+    duration = end - start
 
     if stats_collector is not None:
-        stats_collector.trial_done.remote(end - start)
+        stats_collector.trial_done.remote(duration)
 
         return ray.get(stats_collector.get_stats.remote())
     else:
-        return end - start
+        return duration
 
 
 def shuffle_epoch(
         epoch: int, filenames: List[str],
         batch_consumer: BatchConsumer,
-        num_reducers: int, num_trainers: int, trial_start: float,
-        stats_collector: Union[TrialStatsCollector, None]) -> None:
+        num_reducers: int, num_trainers: int,
+        stats_collector: Union[TrialStatsCollector, None] = None) -> None:
+    """
+    Shuffle the provided dataset for the specified epoch.
+
+    Args:
+        epoch (int): Epoch for which we are shuffling.
+        filenames (str): Paths to input Parquet files.
+        batch_consumer (BatchConsumer): Consumer of shuffle outputs.
+        num_reducers (int): The number of shuffler reducers.
+        num_trainers (int): Number of trainer workers.
+        stats_collector(Optional[TrialStatsCollector]): Shuffle stats
+            collector.
+    """
     if stats_collector is not None:
         stats_collector.epoch_start.remote(epoch)
     reducers_partitions = []
@@ -166,6 +208,20 @@ def shuffle_epoch(
 def shuffle_map(filename: str, num_reducers: int,
                 stats_collector: Union[TrialStatsCollector, None],
                 epoch: int) -> List[List[ray.ObjectRef]]:
+    """
+    Map (data loading and row selection) stage of the shuffle.
+
+    Args:
+        filename (str): Path to input Parquet file.
+        num_reducers (int): The number of shuffler reducers.
+        stats_collector(Optional[TrialStatsCollector]): Shuffle stats
+            collector.
+        epoch (int): Epoch for which we are shuffling.
+
+    Returns:
+        num_reducers partitions, each randomly sampled (without replacement)
+        from rows in provided Parquet file.
+    """
     if stats_collector is not None:
         stats_collector.map_start.remote(epoch)
     start = timeit.default_timer()
@@ -194,6 +250,19 @@ def shuffle_map(filename: str, num_reducers: int,
 def shuffle_reduce(reduce_index: int,
                    stats_collector: Union[TrialStatsCollector, None],
                    epoch: int, *chunks: pd.DataFrame) -> List[pd.DataFrame]:
+    """
+    Reduce (combine and shuffle) stage of the shuffle.
+
+    Args:
+        reduce_idx (int): The index (ID) of this reducer.
+        stats_collector(Optional[TrialStatsCollector]): Shuffle stats
+            collector.
+        epoch (int): Epoch for which we are shuffling.
+        *chunks (pd.DataFrame): DataFrame partition, one from each mapper.
+
+    Returns:
+        A concatenation and full shuffle of all provided mapper partitions.
+    """
     if stats_collector is not None:
         stats_collector.reduce_start.remote(epoch)
     start = timeit.default_timer()
@@ -212,6 +281,17 @@ def shuffle_reduce(reduce_index: int,
 def consume(
         rank: int, batch_consumer: BatchConsumer, epoch: int,
         batches: List[ray.ObjectRef]) -> None:
+    """
+    Consume the provided batches. This is the sink of the shuffle.
+
+    Args:
+        rank (int): The rank (ID) of the consumer.
+        batch_consumer (BatchConsumer): The actual consumer of the shuffle
+            outputs.
+        epoch (int): Epoch for which we're shuffling.
+        batches (List[ray.ObjectRef]): The shuffle outputs from one or more
+            reducer.
+    """
     batch_consumer.consume(rank, epoch, batches)
     # Signal to batch consumer that we're done producing batches for this
     # epoch.
