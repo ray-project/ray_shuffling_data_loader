@@ -1,13 +1,11 @@
 import timeit
-import threading
 from typing import List, Union
 
 import pandas as pd
 import numpy as np
 
 import ray
-from ray_shuffling_data_loader.stats import (TrialStatsCollector,
-                                             collect_store_stats, TrialStats)
+from ray_shuffling_data_loader.stats import (TrialStatsCollector, TrialStats)
 
 
 class BatchConsumer:
@@ -49,84 +47,13 @@ class BatchConsumer:
 #
 
 
-def shuffle_with_stats(
-        filenames: List[str],
-        batch_consumer: BatchConsumer,
-        num_epochs: int, num_reducers: int, num_trainers: int,
-        utilization_sample_period: float) -> (TrialStats, List):
-    """
-    Shuffle the provided dataset every epoch, with shuffle stats collection.
-
-    Args:
-        filenames (str): Paths to input Parquet files.
-        batch_consumer (BatchConsumer): Consumer of shuffle outputs.
-        num_epochs (int): Number of training epochs.
-        num_reducers (Optional[int]): The number of shuffler reducers.
-        num_trainers (int): Number of trainer workers.
-        utilization_sample_period (float): How often to sample object store
-            utilization (in seconds).
-    """
-    stats = None
-    store_stats = []
-    done_event = threading.Event()
-    store_stats_collector_thread = threading.Thread(
-        target=collect_store_stats,
-        args=(store_stats, done_event, utilization_sample_period))
-    try:
-        store_stats_collector_thread.start()
-
-        print(f"Doing {num_epochs} epochs of shuffling.")
-
-        stats = shuffle(
-            filenames,
-            batch_consumer,
-            num_epochs,
-            num_reducers,
-            num_trainers,
-            collect_stats=True)
-    finally:
-        # Signal store stats collector thread that we're done, join the
-        # thread.
-        done_event.set()
-        store_stats_collector_thread.join()
-
-    return stats, store_stats
-
-
-def shuffle_no_stats(
-        filenames: List[str],
-        batch_consumer: BatchConsumer,
-        num_epochs: int, num_reducers: int, num_trainers: int,
-        utilization_sample_period: float = None) -> (float, None):
-    """
-    Shuffle the provided dataset every epoch, without shuffle stats collection.
-
-    Args:
-        filenames (str): Paths to input Parquet files.
-        batch_consumer (BatchConsumer): Consumer of shuffle outputs.
-        num_epochs (int): Number of training epochs.
-        num_reducers (int): The number of shuffler reducers.
-        num_trainers (int): Number of trainer workers.
-        utilization_sample_period (float): How often to sample object store
-            utilization (in seconds).
-    """
-    print(f"Doing {num_epochs} epochs of shuffling.")
-    duration = shuffle(
-        filenames,
-        batch_consumer,
-        num_epochs,
-        num_reducers,
-        num_trainers,
-        collect_stats=False)
-    return duration, None
-
-
 def shuffle(filenames: List[str],
             batch_consumer: BatchConsumer,
             num_epochs: int,
             num_reducers: int,
             num_trainers: int,
-            collect_stats: bool = True) -> Union[TrialStats, float]:
+            stats_collector: Union[TrialStatsCollector, None] = None,
+            ) -> Union[TrialStats, float]:
     """
     Shuffle the provided dataset every epoch.
 
@@ -136,14 +63,9 @@ def shuffle(filenames: List[str],
         num_epochs (int): Number of training epochs.
         num_reducers (int): The number of shuffler reducers.
         num_trainers (int): Number of trainer workers.
-        collect_stats (bool): Whether to collect shuffle stats.
+        stats_collector(Optional[TrialStatsCollector]): Shuffle stats
+            collector.
     """
-    if collect_stats:
-        stats_collector = TrialStatsCollector.remote(
-            num_epochs, len(filenames), num_reducers)
-    else:
-        stats_collector = None
-
     start = timeit.default_timer()
     for epoch_idx in range(num_epochs):
         # Wait until consumer is ready for another epoch shuffle to start.
@@ -160,9 +82,7 @@ def shuffle(filenames: List[str],
     if stats_collector is not None:
         stats_collector.trial_done.remote(duration)
 
-        return ray.get(stats_collector.get_stats.remote())
-    else:
-        return duration
+    return duration
 
 
 def shuffle_epoch(

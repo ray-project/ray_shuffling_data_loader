@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import collections
+import contextlib
 import glob
 import os
 import timeit
@@ -10,8 +11,9 @@ import numpy as np
 
 import ray
 from ray_shuffling_data_loader.shuffle import (
-    shuffle_with_stats, shuffle_no_stats, BatchConsumer)
+    shuffle, BatchConsumer)
 from ray_shuffling_data_loader.stats import (
+    TrialStatsCollector, ObjectStoreStatsCollector,
     process_stats, human_readable_size)
 
 from ray_shuffling_data_loader.data_generation import generate_data
@@ -25,47 +27,33 @@ DEFAULT_UTILIZATION_SAMPLE_PERIOD = 5.0
 
 @ray.remote(num_cpus=0)
 class Consumer:
-    def __init__(self, rank, num_epochs, max_concurrent_epochs):
+    def __init__(
+            self, rank, num_epochs, max_concurrent_epochs,
+            stats_collector=None):
         self._rank = rank
         self._num_epochs = num_epochs
         self._max_epochs = max_concurrent_epochs
         self._curr_epochs = collections.deque()
         self._epoch_done_evs = [asyncio.Event() for _ in range(num_epochs)]
-        # TODO(Clark): Move some of this to the stats collector?
-        self._consume_timestamps = [{} for _ in range(num_epochs)]
-        self._consume_start_times = [None] * num_epochs
-        self._consume_end_times = [None] * num_epochs
-        self._epoch_start_time = [None] * num_epochs
-        self._time_to_consumes = [[] for _ in range(num_epochs)]
+        self._stats_collector = stats_collector
 
     async def new_epoch(self, epoch):
         if len(self._curr_epochs) == self._max_epochs:
             first_epoch = self._curr_epochs.popleft()
             await self._epoch_done_evs[first_epoch].wait()
         self._curr_epochs.append(epoch)
-        self._epoch_start_time = timeit.default_timer()
-        self._consume_timestamps[epoch][self._epoch_start_time] = 0
         print(f"Starting epoch {epoch} on consumer {self._rank}.")
 
     def consume(self, epoch, batch):
-        consume_time = timeit.default_timer()
-        if self._consume_start_times[epoch] is None:
-            self._consume_start_times[epoch] = consume_time
-        self._consume_timestamps[epoch][consume_time] = len(batch)
-        self._time_to_consumes[epoch].append(
-            consume_time - self._epoch_start_time)
+        print(f"Consuming batch on consumer {self._rank} for epoch {epoch}.")
+        if self._stats_collector is not None:
+            self._stats_collector.consume_batch.remote(epoch, len(batch))
 
     def producer_done(self, epoch):
-        self._consume_end_times[epoch] = timeit.default_timer()
+        if self._stats_collector is not None:
+            self._stats_collector.consume_done.remote(epoch)
         self._epoch_done_evs[epoch].set()
         print(f"Epoch {epoch} done on consumer {self._rank}.")
-
-    def get_stats(self):
-        return (
-            self._consume_timestamps,
-            self._time_to_consumes,
-            self._consume_start_times,
-            self._consume_end_times)
 
     async def wait_until_all_epochs_done(self):
         await self._epoch_done_evs[self._num_epochs - 1].wait()
@@ -75,11 +63,13 @@ class Consumer:
 
 
 class BatchConsumer(BatchConsumer):
-    def __init__(self, num_trainers, num_epochs, pg, max_concurrent_epochs):
+    def __init__(
+            self, num_trainers, num_epochs, pg, max_concurrent_epochs,
+            stats_collector=None):
         self._consumers = [
             Consumer.options(
                 placement_group=pg).remote(
-                    rank, num_epochs, max_concurrent_epochs)
+                    rank, num_epochs, max_concurrent_epochs, stats_collector)
             for rank in range(num_trainers)]
 
     def consume(self, rank: int, epoch: int, batches: List[ray.ObjectRef]):
@@ -131,53 +121,62 @@ def run_trials(num_epochs,
     Run shuffling trials.
     """
     print("Using from-memory shuffler.")
-    if collect_stats:
-        shuffle = shuffle_with_stats
-    else:
-        shuffle = shuffle_no_stats
     all_stats = []
+    pg = ray.util.placement_group(
+        [
+            {"resources": 1}
+            for _ in range(num_trainers)],
+        strategy="SPREAD")
+    ray.get(pg.ready())
+    if collect_stats:
+        stats_collector = TrialStatsCollector.remote(
+            num_epochs, len(filenames), num_reducers, num_trainers)
+        object_store_stats_collector = ObjectStoreStatsCollector(
+            utilization_sample_period)
+    else:
+        stats_collector = None
+        try:
+            object_store_stats_collector = contextlib.nullcontext()
+        except AttributeError:
+            # Python 3.6 doesn't support nullcontext().
+            object_store_stats_collector = contextlib.suppress()
+    batch_consumer = BatchConsumer(
+        num_trainers, num_epochs, pg, max_concurrent_epochs,
+        stats_collector)
+    # Wait until batch consumer actors have been created.
+    batch_consumer.actors_ready()
     if num_trials is not None:
         for trial in range(num_trials):
             print(f"Starting trial {trial}.")
-            pg = ray.util.placement_group(
-                [
-                    {"resources": 1}
-                    for _ in range(num_trainers)],
-                strategy="SPREAD")
-            ray.get(pg.ready())
-            batch_consumer = BatchConsumer(
-                num_trainers, num_epochs, pg, max_concurrent_epochs)
-            # Wait until batch consumer actors have been created.
-            batch_consumer.actors_ready()
-            stats, store_stats = shuffle(
-                filenames, batch_consumer, num_epochs, num_reducers,
-                num_trainers, utilization_sample_period)
-            duration = stats.duration if collect_stats else stats
+            with object_store_stats_collector:
+                duration = shuffle(
+                    filenames, batch_consumer, num_epochs, num_reducers,
+                    num_trainers, stats_collector)
             print(f"Trial {trial} done after {duration} seconds.")
-            consumer_stats = batch_consumer.get_stats()
-            all_stats.append((stats, consumer_stats, store_stats))
+            if collect_stats:
+                stats = ray.get(stats_collector.get_stats.remote())
+                store_stats = object_store_stats_collector.get_stats()
+            else:
+                stats = duration
+                store_stats = None
+            all_stats.append((stats, store_stats))
     elif trials_timeout is not None:
         start = timeit.default_timer()
         trial = 0
         while timeit.default_timer() - start < trials_timeout:
             print(f"Starting trial {trial}.")
-            pg = ray.util.placement_group(
-                [
-                    {"resources": 1}
-                    for _ in range(num_trainers)],
-                strategy="SPREAD")
-            ray.get(pg.ready())
-            batch_consumer = BatchConsumer(
-                num_trainers, num_epochs, pg, max_concurrent_epochs)
-            # Wait until batch consumer actors have been created.
-            batch_consumer.actors_ready()
-            stats, store_stats = shuffle(
-                filenames, batch_consumer, num_epochs, num_reducers,
-                num_trainers, utilization_sample_period)
-            duration = stats.duration if collect_stats else stats
+            with object_store_stats_collector:
+                duration = shuffle(
+                    filenames, batch_consumer, num_epochs, num_reducers,
+                    num_trainers, stats_collector)
             print(f"Trial {trial} done after {duration} seconds.")
-            consumer_stats = batch_consumer.get_stats()
-            all_stats.append((stats, consumer_stats, store_stats))
+            if collect_stats:
+                stats = ray.get(stats_collector.get_stats.remote())
+                store_stats = object_store_stats_collector.get_stats()
+            else:
+                stats = duration
+                store_stats = None
+            all_stats.append((stats, store_stats))
             trial += 1
     else:
         raise ValueError(

@@ -69,7 +69,7 @@ class ShufflingDataset:
                 num_epochs,
                 num_reducers,
                 num_trainers,
-                collect_stats=False)
+                stats_collector=None)
         else:
             # rank != 0 --> worker process
             # Connect to the batch queue.

@@ -4,7 +4,8 @@ from dataclasses import dataclass
 import datetime
 import math
 import os
-from typing import List
+import threading
+from typing import List, Dict
 import timeit
 
 import fsspec
@@ -37,10 +38,24 @@ class ReduceStats(StageStats):
 
 
 @dataclass
+class ConsumeStats:
+    stage_duration: float
+    consume_times: Dict[float, int]
+    time_to_consumes: List[float]
+
+
+@dataclass
+class ThrottleStats:
+    wait_duration: float
+
+
+@dataclass
 class EpochStats:
     duration: float
     map_stats: MapStats
     reduce_stats: ReduceStats
+    consume_stats: ConsumeStats
+    throttle_stats: ThrottleStats
 
 
 @dataclass
@@ -55,9 +70,10 @@ class TrialStats:
 
 
 class EpochStatsCollector_:
-    def __init__(self, num_maps, num_reduces):
+    def __init__(self, num_maps, num_reduces, num_consumes):
         self._num_maps = num_maps
         self._num_reduces = num_reduces
+        self._num_consumes = num_consumes
         self._duration = None
         self._epoch_start_time = None
         self._maps_started = 0
@@ -67,15 +83,23 @@ class EpochStatsCollector_:
         self._reduces_started = 0
         self._reduces_done = 0
         self._reduce_durations = []
+        self._batches_consumed = 0
+        self._consumes_done = 0
+        self._consume_times = {}
+        self._time_to_consumes = []
+        self._throttle_duration = None
         self._map_stage_start_time = None
         self._reduce_stage_start_time = None
+        self._consume_stage_start_time = None
         self._map_stage_duration = None
         self._reduce_stage_duration = None
+        self._consume_stage_duration = None
 
         self._epoch_done_ev = asyncio.Event()
 
     def epoch_start(self):
         self._epoch_start_time = timeit.default_timer()
+        self._consume_times[self._epoch_start_time] = 0
 
     def _epoch_done(self, end_time):
         assert self._epoch_start_time is not None
@@ -105,6 +129,19 @@ class EpochStatsCollector_:
         if self._reduces_done == self._num_reduces:
             self._reduce_stage_done(timeit.default_timer())
 
+    def consume_batch(self, num_rows):
+        consume_time = timeit.default_timer()
+        if self._batches_consumed == 0:
+            self._consume_stage_start(consume_time)
+        self._consume_times[consume_time] = num_rows
+        self._time_to_consumes.append(consume_time - self._epoch_start_time)
+        self._batches_consumed += 1
+
+    def consume_done(self):
+        self._consumes_done += 1
+        if self._consumes_done == self._num_consumes:
+            self._consume_stage_done(timeit.default_timer())
+
     def _map_stage_start(self, start_time):
         self._map_stage_start_time = start_time
 
@@ -120,6 +157,17 @@ class EpochStatsCollector_:
         self._reduce_stage_duration = end_time - self._reduce_stage_start_time
         self._epoch_done(end_time)
 
+    def _consume_stage_start(self, start_time):
+        self._consume_stage_start_time = start_time
+
+    def _consume_stage_done(self, end_time):
+        assert self._consume_stage_start_time is not None
+        self._consume_stage_duration = (
+            end_time - self._consume_stage_start_time)
+
+    def throttle_done(self, duration):
+        self._throttle_duration = duration
+
     def get_map_stats(self):
         assert self._map_stage_duration is not None
         assert len(self._map_durations) == self._num_maps
@@ -132,19 +180,36 @@ class EpochStatsCollector_:
         assert self._reduce_stage_duration is not None
         return ReduceStats(self._reduce_durations, self._reduce_stage_duration)
 
+    def get_consume_stats(self):
+        assert self._batches_consumed == self._num_reduces
+        assert self._consume_stage_duration is not None
+        assert len(self._time_to_consumes) == self._num_reduces
+        return ConsumeStats(
+            self._consume_stage_duration,
+            self._consume_times,
+            self._time_to_consumes,
+        )
+
+    def get_throttle_stats(self):
+        if self._throttle_duration is None:
+            self._throttle_duration = 0
+        return ThrottleStats(self._throttle_duration)
+
     async def get_stats(self):
         await self._epoch_done_ev.wait()
         assert self._duration is not None
         assert self._maps_done == self._num_maps
         assert self._reduces_done == self._num_reduces
+        assert self._consumes_done == self._num_consumes
         return EpochStats(self._duration, self.get_map_stats(),
-                          self.get_reduce_stats())
+                          self.get_reduce_stats(), self.get_consume_stats(),
+                          self.get_throttle_stats())
 
 
 class TrialStatsCollector_:
-    def __init__(self, num_epochs, num_maps, num_reduces):
+    def __init__(self, num_epochs, num_maps, num_reduces, num_consumes):
         self._collectors = [
-            EpochStatsCollector_(num_maps, num_reduces)
+            EpochStatsCollector_(num_maps, num_reduces, num_consumes)
             for _ in range(num_epochs)
         ]
         self._duration = None
@@ -154,6 +219,9 @@ class TrialStatsCollector_:
     def trial_done(self, duration):
         self._duration = duration
         self._trial_done_ev.set()
+
+    def epoch_throttle_done(self, epoch, duration):
+        self._collectors[epoch].throttle_done(duration)
 
     async def epoch_start(self, epoch):
         self._collectors[epoch].epoch_start()
@@ -170,6 +238,12 @@ class TrialStatsCollector_:
     def reduce_done(self, epoch, duration):
         self._collectors[epoch].reduce_done(duration)
 
+    def consume_batch(self, epoch, num_rows):
+        self._collectors[epoch].consume_batch(num_rows)
+
+    def consume_done(self, epoch):
+        self._collectors[epoch].consume_done()
+
     async def get_stats(self):
         await self._trial_done_ev.wait()
         epoch_stats = await asyncio.gather(
@@ -178,7 +252,32 @@ class TrialStatsCollector_:
         return TrialStats(epoch_stats, self._duration)
 
 
-TrialStatsCollector = ray.remote(TrialStatsCollector_)
+TrialStatsCollector = ray.remote(num_cpus=0)(TrialStatsCollector_)
+
+
+class ObjectStoreStatsCollector:
+    def __init__(self, utilization_sample_period=5.0):
+        self._utilization_sample_period = utilization_sample_period
+        self._store_stats = None
+
+    def __enter__(self):
+        self._store_stats = []
+        self._done_event = threading.Event()
+        self._store_stats_collector_thread = threading.Thread(
+            target=collect_store_stats,
+            args=(
+                self._store_stats, self._done_event,
+                self._utilization_sample_period))
+        self._store_stats_collector_thread.start()
+
+    def __exit__(self, *exc_details):
+        # Signal store stats collector thread that we're done, join the
+        # thread.
+        self._done_event.set()
+        self._store_stats_collector_thread.join()
+
+    def get_stats(self):
+        return self._store_stats
 
 #
 # Stats processing utilities.
@@ -189,7 +288,7 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
                   no_consumer_stats, unique_stats, num_rows, num_files,
                   num_row_groups_per_file, batch_size, num_reducers,
                   num_trainers, num_epochs, max_concurrent_epochs):
-    stats_list, consumer_stats, store_stats_list = zip(*all_stats)
+    stats_list, store_stats_list = zip(*all_stats)
     times = [stats.duration for stats in stats_list]
     mean = np.mean(times)
     std = np.std(times)
@@ -292,10 +391,7 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
             "num_epochs": num_epochs,
             "max_concurrent_epochs": max_concurrent_epochs,
         }
-        for trial, (
-                stats,
-                (_, trial_time_to_consumes, trial_consume_stage_durations),
-                store_stats) in enumerate(all_stats):
+        for trial, (stats, store_stats) in enumerate(all_stats):
             row["trial"] = trial
             row["duration"] = stats.duration
             row["row_throughput"] = row_throughput = (
@@ -314,11 +410,7 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
             reduce_stage_durations = []
             consume_stage_durations = []
             time_to_consumes = []
-            for (
-                    epoch_stats, epoch_time_to_consumes,
-                    epoch_consume_stage_duration) in zip(
-                        stats.epoch_stats, trial_time_to_consumes,
-                        trial_consume_stage_durations):
+            for epoch_stats in stats.epoch_stats:
                 epoch_durations.append(epoch_stats.duration)
                 # Map stage.
                 map_stats = epoch_stats.map_stats
@@ -330,8 +422,9 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
                 reduce_stage_durations.append(reduce_stats.stage_duration)
                 reduce_task_durations.extend(reduce_stats.task_durations)
                 # Consume stage.
-                consume_stage_durations.append(epoch_consume_stage_duration)
-                time_to_consumes.extend(epoch_time_to_consumes)
+                consume_stats = epoch_stats.consume_stats
+                consume_stage_durations.append(consume_stats.stage_duration)
+                time_to_consumes.extend(consume_stats.time_to_consumes)
 
             # Trial store stats.
             store_bytes_used = [
@@ -435,18 +528,10 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
                 "num_epochs": num_epochs,
                 "max_concurrent_epochs": max_concurrent_epochs,
             }
-            for trial, (trial_stats,
-                        (
-                            _, trial_time_to_consumes,
-                            trial_consumer_durations),
-                        trial_store_stats) in enumerate(all_stats):
+            for trial, (
+                    trial_stats, trial_store_stats) in enumerate(all_stats):
                 row["trial"] = trial
-                for epoch, (
-                        stats,
-                        time_to_consumes,
-                        consumer_duration) in enumerate(zip(
-                            trial_stats.epoch_stats,
-                            trial_time_to_consumes, trial_consumer_durations)):
+                for epoch, stats in enumerate(trial_stats.epoch_stats):
                     row["epoch"] = epoch
                     row["duration"] = stats.duration
                     row["row_throughput"] = row_throughput = (
@@ -459,7 +544,8 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
                         stats.map_stats.stage_duration)
                     row["reduce_stage_duration"] = (
                         stats.reduce_stats.stage_duration)
-                    row["consume_stage_duration"] = consumer_duration
+                    row["consume_stage_duration"] = (
+                        stats.consume_stats.stage_duration)
                     row["avg_map_task_duration"] = np.mean(
                         stats.map_stats.task_durations)
                     row["std_map_task_duration"] = np.std(
@@ -484,10 +570,14 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
                         stats.reduce_stats.task_durations)
                     row["min_reduce_task_duration"] = np.min(
                         stats.reduce_stats.task_durations)
-                    row["avg_time_to_consume"] = np.mean(time_to_consumes)
-                    row["std_time_to_consume"] = np.std(time_to_consumes)
-                    row["max_time_to_consume"] = np.max(time_to_consumes)
-                    row["min_time_to_consume"] = np.min(time_to_consumes)
+                    row["avg_time_to_consume"] = np.mean(
+                        stats.consume_stats.time_to_consumes)
+                    row["std_time_to_consume"] = np.std(
+                        stats.consume_stats.time_to_consumes)
+                    row["max_time_to_consume"] = np.max(
+                        stats.consume_stats.time_to_consumes)
+                    row["min_time_to_consume"] = np.min(
+                        stats.consume_stats.time_to_consumes)
                     writer.writerow(row)
     if not no_consumer_stats:
         filename = (
@@ -524,21 +614,18 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
                 "num_epochs": num_epochs,
                 "max_concurrent_epochs": max_concurrent_epochs,
             }
-            for trial, (
-                    _, (trial_consume_times, _, _), _) in enumerate(all_stats):
+            for trial, (trial_stats, _) in enumerate(all_stats):
                 row["trial"] = trial
-                for epoch, epoch_consume_times in enumerate(
-                        trial_consume_times):
+                for epoch, stats in enumerate(trial_stats.epoch_stats):
                     row["epoch"] = epoch
-                    for consume_times in epoch_consume_times:
-                        for (
-                                timestamp,
-                                num_rows_in_reducer_batch,
-                                ) in consume_times.items():
-                            row["timestamp"] = timestamp
-                            row["num_rows_in_reducer_batch"] = (
-                                num_rows_in_reducer_batch)
-                            writer.writerow(row)
+                    for (
+                            timestamp,
+                            num_rows_in_reducer_batch,
+                            ) in stats.consume_stats.consume_times.items():
+                        row["timestamp"] = timestamp
+                        row["num_rows_in_reducer_batch"] = (
+                            num_rows_in_reducer_batch)
+                        writer.writerow(row)
 
 
 UNITS = ["", "K", "M", "B", "T", "Q"]
