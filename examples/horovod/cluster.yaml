@@ -12,7 +12,7 @@ max_workers: 3
 # If a node is idle for this many minutes, it will be removed.
 idle_timeout_minutes: 20
 docker:
-    image: richardliaw/horovod
+    image: horovod/horovod-ray:master
     container_name: ray_docker
 
 # Cloud-provider specific configuration.
@@ -44,7 +44,7 @@ head_node:
               - Key: anyscale-user
                 Value: "clark@anyscale.com"
               - Key: anyscale-expiration
-                Value: "2021-05-10"
+                Value: "2021-06-10"
     # InstanceMarketOptions:
     #     MarketType: spot
            # SpotOptions:
@@ -63,7 +63,7 @@ worker_nodes:
               - Key: anyscale-user
                 Value: "clark@anyscale.com"
               - Key: anyscale-expiration
-                Value: "2021-05-10"
+                Value: "2021-06-10"
     # Run workers on spot by default. Comment this out to use on-demand.
     # InstanceMarketOptions:
     #     MarketType: spot
@@ -73,14 +73,15 @@ worker_nodes:
 file_mounts: {
     # /home/ubuntu/anaconda3/lib/python3.7/site-packages/horovod-0.21.1-py3.7-linux-x86_64.egg/horovod/ray/elastic.py: ~/dev/horovod/horovod/ray/elastic.py,
     # /home/ubuntu/horovod/: /Users/rliaw/dev/horovod,
-    "/home/ubuntu/.local/lib/python3.7/site-packages/ray_shuffling_data_loader": "/home/ubuntu/workspace/ray_shuffling_data_loader/ray_shuffling_data_loader",
+    "/home/ray/ray_shuffling_data_loader": "/home/ubuntu/workspace/ray_shuffling_data_loader",
 }
 
 setup_commands:
-    - pip install -q boto3 tqdm torch torchvision tensorboard
-    # - pip install -U https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-2.0.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
-    - pip install -U ray
-    - pip install git+https://github.com/ray-project/ray_shuffling_data_loader.git@main#egg=ray_shuffling_data_loader
+    - pip install boto3 fsspec==2021.05.0 tqdm torch torchvision tensorboard s3fs==2021.05.0 pyarrow
+    # - pip install -U ray==1.3.0
+    - pip install -U https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-2.0.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
+    # - pip install -U git+https://github.com/ray-project/ray_shuffling_data_loader.git@feat/consumer-redesign#egg=ray_shuffling_data_loader
+    - cp -r /home/ray/ray_shuffling_data_loader /home/ray/tmp_ray_shuffle && cd /home/ray/tmp_ray_shuffle && pip install -e .
     # - docker pull richardliaw/horovod
     # - pip install ray[tune]
     # - cd horovod && git submodule update --init --recursive
@@ -95,10 +96,10 @@ worker_setup_commands: []
 # # Command to start ray on the head node. You don't need to change this.
 head_start_ray_commands:
     - ray stop --force
-    - ray start --head --port=6379 --object-manager-port=8076 --autoscaling-config=~/ray_bootstrap_config.yaml --object-store-memory=$(( 75 * 1024 * 1024 * 1024 )) --system-config='{"automatic_object_spilling_enabled":false,"idle_worker_killing_time_threshold_ms":1000000}'
+    - ray start --head --port=6379 --object-manager-port=8076 --autoscaling-config=~/ray_bootstrap_config.yaml --object-store-memory=$(( 75 * 1000 * 1000 * 1000 )) --system-config='{"automatic_object_spilling_enabled":false,"idle_worker_killing_time_threshold_ms":1000000}'
 
 # Command to start ray on worker nodes. You don't need to change this.
 worker_start_ray_commands:
     - ray stop --force
-    - ray start --address=$RAY_HEAD_IP:6379 --object-manager-port=8076 --object-store-memory=$(( 75 * 1024 * 1024 * 1024 ))
+    - ray start --address=$RAY_HEAD_IP:6379 --object-manager-port=8076 --object-store-memory=$(( 75 * 1000 * 1000 * 1000 ))
 

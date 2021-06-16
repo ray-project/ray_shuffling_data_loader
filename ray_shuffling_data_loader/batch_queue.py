@@ -1,8 +1,9 @@
 import asyncio
 import logging
-import time
 from typing import Optional, Any, List, Dict
 from collections.abc import Iterable
+import collections
+import time
 
 import ray
 
@@ -20,8 +21,9 @@ class Full(Exception):
 # TODO(Clark): Update docstrings and examples.
 
 
-class MultiQueue:
-    """A first-in, first-out queue implementation on Ray.
+class BatchQueue:
+    """A first-in, first-out queue implementation on Ray, meant to serve as a
+    GPU batch queue between data loaders and distributed training workers.
 
     The behavior and use cases are similar to those of the asyncio.Queue class.
 
@@ -39,27 +41,17 @@ class MultiQueue:
             the QueueActor during creation. These are directly passed into
             QueueActor.options(...). This could be useful if you
             need to pass in custom resource requirements, for example.
-
-    Examples:
-        >>> q = Queue()
-        >>> items = list(range(10))
-        >>> for item in items:
-        >>>     q.put(item)
-        >>> for item in items:
-        >>>     assert item == q.get()
-        >>> # Create Queue with the underlying actor reserving 1 CPU.
-        >>> q = Queue(actor_options={"num_cpus": 1})
     """
 
     def __init__(self,
-                 num_queues: int,
+                 num_epochs: int,
+                 num_trainers: int,
+                 max_concurrent_epochs: int,
                  maxsize: int = 0,
                  name: str = None,
                  connect: bool = False,
                  actor_options: Optional[Dict] = None,
                  connect_retries: int = 5) -> None:
-        self.num_queues = num_queues
-        self.maxsize = maxsize
         if connect:
             assert actor_options is None
             assert name is not None
@@ -69,30 +61,80 @@ class MultiQueue:
             if name is not None:
                 actor_options["name"] = name
             self.actor = ray.remote(_QueueActor).options(
-                **actor_options).remote(self.num_queues, self.maxsize)
+                **actor_options).remote(
+                    max_concurrent_epochs, num_epochs,
+                    num_trainers, maxsize)
+
+    def ready(self):
+        """
+        Wait until the queue actor is ready.
+        """
+        ray.get(self.actor.ready.remote())
+
+    def new_epoch(self, epoch: int):
+        """
+        Prepare the queue for a new epoch, blocking until the queue has
+        capacity for a new epoch (in accordance with the provided
+        max_concurrent_epochs).
+
+        Args:
+            epoch (int): The new epoch.
+        """
+        ray.get(self.actor.new_epoch.remote(epoch))
+
+    def producer_done(self, rank: int, epoch: int):
+        """
+        Signal to the queue that the batch producer for the provided epoch
+        and trainer is done. This should be used by the data loader to indicate
+        that the producer is done producing batches.
+
+        Args:
+            rank (int): The rank of the target trainer.
+            epoch (int): The epoch that's done.
+        """
+        self.actor.producer_done.remote(rank, epoch)
+
+    def task_done(self, rank: int, epoch: int, num_items: int = 1):
+        """
+        Signal to the queue that num_items batches are done being processed
+        by the given trainer for the provided epoch. This should be used by the
+        trainer to indicate that the consumer is done consuming batches.
+
+        Args:
+            rank (int): The rank of the trainer that's done.
+            epoch (int): The epoch that's done.
+            num_items (int): How many batches are done being processed. Default
+                is 1.
+        """
+        self.actor.task_done.remote(rank, epoch, num_items)
+
+    def wait_until_all_epochs_done(self):
+        """
+        Block until all batches for all epochs are done being consumed.
+        """
+        ray.get(self.actor.wait_until_all_epochs_done.remote())
 
     def __len__(self) -> int:
-        return sum(
-            self.size(queue_idx) for queue_idx in range(self.num_queues))
+        return ray.get(self.actor.size.remote())
 
-    def size(self, queue_idx: int) -> int:
+    def size(self, rank: int, epoch: int) -> int:
         """The size of the queue."""
-        return ray.get(self.actor.qsize.remote(queue_idx))
+        return ray.get(self.actor.qsize.remote(rank, epoch))
 
-    def qsize(self, queue_idx: int) -> int:
+    def qsize(self, rank: int, epoch: int) -> int:
         """The size of the queue."""
-        return self.size(queue_idx)
+        return self.size(rank, epoch)
 
-    def empty(self, queue_idx: int) -> bool:
+    def empty(self, rank: int, epoch: int) -> bool:
         """Whether the queue is empty."""
-        return ray.get(self.actor.empty.remote(queue_idx))
+        return ray.get(self.actor.empty.remote(rank, epoch))
 
-    def full(self, queue_idx: int) -> bool:
+    def full(self, rank: int, epoch: int) -> bool:
         """Whether the queue is full."""
-        return ray.get(self.actor.full.remote(queue_idx))
+        return ray.get(self.actor.full.remote(rank, epoch))
 
     def put(self,
-            queue_idx: int,
+            rank: int, epoch: int,
             item: Any,
             block: bool = True,
             timeout: Optional[float] = None) -> None:
@@ -111,17 +153,17 @@ class MultiQueue:
         """
         if not block:
             try:
-                ray.get(self.actor.put_nowait.remote(queue_idx, item))
+                ray.get(self.actor.put_nowait.remote(rank, epoch, item))
             except asyncio.QueueFull:
                 raise Full
         else:
             if timeout is not None and timeout < 0:
                 raise ValueError("'timeout' must be a non-negative number")
             else:
-                ray.get(self.actor.put.remote(queue_idx, item, timeout))
+                ray.get(self.actor.put.remote(rank, epoch, item, timeout))
 
     def put_batch(self,
-                  queue_idx: int,
+                  rank: int, epoch: int,
                   items: Iterable,
                   block: bool = True,
                   timeout: Optional[float] = None) -> None:
@@ -140,19 +182,19 @@ class MultiQueue:
         """
         if not block:
             try:
-                ray.get(self.actor.put_nowait_batch.remote(queue_idx, items))
+                ray.get(self.actor.put_nowait_batch.remote(rank, epoch, items))
             except asyncio.QueueFull:
                 raise Full
         else:
             if timeout is not None and timeout < 0:
                 raise ValueError("'timeout' must be a non-negative number")
             else:
-                ray.get(self.actor.put_batch.remote(queue_idx, items, timeout))
+                ray.get(
+                    self.actor.put_batch.remote(rank, epoch, items, timeout))
 
     async def put_async(self,
-                        queue_idx: int,
-                        item: Any,
-                        block: bool = True,
+                        rank: int, epoch: int,
+                        item: Any, block: bool = True,
                         timeout: Optional[float] = None) -> None:
         """Adds an item to the queue.
 
@@ -169,17 +211,17 @@ class MultiQueue:
         """
         if not block:
             try:
-                await self.actor.put_nowait.remote(queue_idx, item)
+                await self.actor.put_nowait.remote(rank, epoch, item)
             except asyncio.QueueFull:
                 raise Full
         else:
             if timeout is not None and timeout < 0:
                 raise ValueError("'timeout' must be a non-negative number")
             else:
-                await self.actor.put.remote(queue_idx, item, timeout)
+                await self.actor.put.remote(rank, epoch, item, timeout)
 
     def get(self,
-            queue_idx: int,
+            rank: int, epoch: int,
             block: bool = True,
             timeout: Optional[float] = None) -> Any:
         """Gets an item from the queue.
@@ -200,17 +242,17 @@ class MultiQueue:
         """
         if not block:
             try:
-                return ray.get(self.actor.get_nowait.remote(queue_idx))
+                return ray.get(self.actor.get_nowait.remote(rank, epoch))
             except asyncio.QueueEmpty:
                 raise Empty
         else:
             if timeout is not None and timeout < 0:
                 raise ValueError("'timeout' must be a non-negative number")
             else:
-                return ray.get(self.actor.get.remote(queue_idx, timeout))
+                return ray.get(self.actor.get.remote(rank, epoch, timeout))
 
     async def get_async(self,
-                        queue_idx: int,
+                        rank: int, epoch: int,
                         block: bool = True,
                         timeout: Optional[float] = None) -> Any:
         """Gets an item from the queue.
@@ -227,24 +269,27 @@ class MultiQueue:
         """
         if not block:
             try:
-                return await self.actor.get_nowait.remote(queue_idx)
+                return await self.actor.get_nowait.remote(rank, epoch)
             except asyncio.QueueEmpty:
                 raise Empty
         else:
             if timeout is not None and timeout < 0:
                 raise ValueError("'timeout' must be a non-negative number")
             else:
-                return await self.actor.get.remote(queue_idx, timeout)
+                return await self.actor.get.remote(rank, epoch, timeout)
 
-    def put_nowait(self, queue_idx: int, item: Any) -> None:
+    def get_batch(self, rank: int, epoch: int) -> Any:
+        return ray.get(self.actor.get_batch.remote(rank, epoch))
+
+    def put_nowait(self, rank: int, epoch: int, item: Any) -> None:
         """Equivalent to put(item, block=False).
 
         Raises:
             Full: if the queue is full.
         """
-        return self.put(queue_idx, item, block=False)
+        return self.put(rank, epoch, item, block=False)
 
-    def put_nowait_batch(self, queue_idx: int, items: Iterable) -> None:
+    def put_nowait_batch(self, rank: int, epoch: int, items: Iterable) -> None:
         """Takes in a list of items and puts them into the queue in order.
 
         Raises:
@@ -253,30 +298,32 @@ class MultiQueue:
         if not isinstance(items, Iterable):
             raise TypeError("Argument 'items' must be an Iterable")
 
-        ray.get(self.actor.put_nowait_batch.remote(queue_idx, items))
+        ray.get(self.actor.put_nowait_batch.remote(rank, epoch, items))
 
-    def get_nowait(self, queue_idx: int) -> Any:
+    def get_nowait(self, rank: int, epoch: int) -> Any:
         """Equivalent to get(block=False).
 
         Raises:
             Empty: if the queue is empty.
         """
-        return self.get(queue_idx, block=False)
+        return self.get(rank, epoch, block=False)
 
-    def get_nowait_batch(self, queue_idx: int, num_items: int) -> List[Any]:
+    def get_nowait_batch(
+            self, rank: int, epoch: int, num_items: int = None) -> List[Any]:
         """Gets items from the queue and returns them in a
         list in order.
 
         Raises:
             Empty: if the queue does not contain the desired number of items
         """
-        if not isinstance(num_items, int):
-            raise TypeError("Argument 'num_items' must be an int")
-        if num_items < 0:
-            raise ValueError("'num_items' must be nonnegative")
+        if num_items is not None:
+            if not isinstance(num_items, int):
+                raise TypeError("Argument 'num_items' must be an int")
+            if num_items < 0:
+                raise ValueError("'num_items' must be nonnegative")
 
         return ray.get(
-            self.actor.get_nowait_batch.remote(queue_idx, num_items))
+            self.actor.get_nowait_batch.remote(rank, epoch, num_items))
 
     def shutdown(self, force: bool = False, grace_period_s: int = 5) -> None:
         """Terminates the underlying QueueActor.
@@ -329,57 +376,133 @@ def connect_queue_actor(name, num_retries=5):
 
 
 class _QueueActor:
-    def __init__(self, num_queues, maxsize):
+    def __init__(
+            self, max_epochs, num_epochs, num_trainers, maxsize):
+        self.max_epochs = max_epochs
+        self.num_epochs = num_epochs
+        self.curr_epochs = collections.deque()
+        self.queues = [
+            [
+                asyncio.Queue(maxsize)
+                for _ in range(num_trainers)]
+            for _ in range(num_epochs)]
+        self.queue_producer_done = [
+            [
+                asyncio.Event()
+                for _ in range(num_trainers)]
+            for _ in range(num_epochs)]
         self.maxsize = maxsize
-        self.queues = [asyncio.Queue(self.maxsize) for _ in range(num_queues)]
 
-    def qsize(self, queue_idx: int):
-        return self.queues[queue_idx].qsize()
+    async def new_epoch(self, epoch: int):
+        # Before kicking off a shuffle for a new epoch, we need to wait until
+        # we know that no more batches will be added to the queue, and then
+        # wait until all existing batches currently in the queue have been
+        # fully processed by the trainers. The former ensures that we don't
+        # miss any future batches, and is accomplished by waiting for a done
+        # signal from all producers. The latter ensures that we don't consider
+        # the current epoch to be done until trainers are finished processing
+        # all batches for that epoch which provides more sensible backpressure
+        # semantics, and is accomplished by waiting for a done signal from
+        # trainers for all of the current epoch's batches.
+        if len(self.curr_epochs) == self.max_epochs:
+            first_epoch = self.curr_epochs.popleft()
+            # Wait until queue producers for all trainers are done.
+            await asyncio.wait([
+                event.wait()
+                for event in self.queue_producer_done[first_epoch]])
+            # Wait until trainers are done with batches.
+            await asyncio.wait([
+                queue.join()
+                for queue in self.queues[first_epoch]])
+            # TODO(Clark): The queues and events for this epoch should no
+            # longer be accessed after this point, so we could set them to
+            # None here and save some space.
+        self.curr_epochs.append(epoch)
 
-    def empty(self, queue_idx: int):
-        return self.queues[queue_idx].empty()
+    async def producer_done(self, rank: int, epoch: int):
+        await self.queues[epoch][rank].put(None)
+        self.queue_producer_done[epoch][rank].set()
 
-    def full(self, queue_idx: int):
-        return self.queues[queue_idx].full()
+    async def wait_until_all_epochs_done(self):
+        await asyncio.wait([
+            event.wait()
+            for event in self.queue_producer_done[self.num_epochs - 1]])
+        # With the final epoch producer being done, we're guaranteed that
+        # no more batches will be added to the queue, so we join on the
+        # current queue items.
+        await asyncio.wait([
+            queue.join() for queue in self.queues[self.num_epochs - 1]])
 
-    async def put(self, queue_idx: int, item, timeout=None):
+    def size(self):
+        return sum(q.qsize() for queues in self.queues for q in queues)
+
+    def qsize(self, rank: int, epoch: int):
+        return self.queues[epoch][rank].qsize()
+
+    def empty(self, rank: int, epoch: int):
+        return self.queues[epoch][rank].empty()
+
+    def full(self, rank: int, epoch: int):
+        return self.queues[epoch][rank].full()
+
+    async def put(self, rank: int, epoch: int, item, timeout=None):
         try:
-            await asyncio.wait_for(self.queues[queue_idx].put(item), timeout)
+            await asyncio.wait_for(self.queues[epoch][rank].put(item), timeout)
         except asyncio.TimeoutError:
             raise Full
 
-    async def put_batch(self, queue_idx: int, items, timeout=None):
+    async def put_batch(self, rank: int, epoch: int, items, timeout=None):
         for item in items:
             try:
-                await asyncio.wait_for(self.queues[queue_idx].put(item),
+                await asyncio.wait_for(self.queues[epoch][rank].put(item),
                                        timeout)
             except asyncio.TimeoutError:
                 raise Full
 
-    async def get(self, queue_idx: int, timeout=None):
+    async def get(self, rank: int, epoch: int, timeout=None):
         try:
-            return await asyncio.wait_for(self.queues[queue_idx].get(),
+            return await asyncio.wait_for(self.queues[epoch][rank].get(),
                                           timeout)
         except asyncio.TimeoutError:
             raise Empty
 
-    def put_nowait(self, queue_idx: int, item):
-        self.queues[queue_idx].put_nowait(item)
+    async def get_batch(self, rank: int, epoch: int):
+        batch = [await self.queues[epoch][rank].get()]
+        while True:
+            try:
+                batch.append(self.queues[epoch][rank].get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return batch
 
-    def put_nowait_batch(self, queue_idx: int, items):
+    def put_nowait(self, rank: int, epoch: int, item):
+        self.queues[epoch][rank].put_nowait(item)
+
+    def put_nowait_batch(self, rank: int, epoch: int, items):
         # If maxsize is 0, queue is unbounded, so no need to check size.
         if (self.maxsize > 0
-                and len(items) + self.qsize(queue_idx) > self.maxsize):
+                and len(items) + self.qsize(rank, epoch) > self.maxsize):
             raise Full(f"Cannot add {len(items)} items to queue of size "
                        f"{self.qsize()} and maxsize {self.maxsize}.")
         for item in items:
-            self.queues[queue_idx].put_nowait(item)
+            self.queues[epoch][rank].put_nowait(item)
 
-    def get_nowait(self, queue_idx: int):
-        return self.queues[queue_idx].get_nowait()
+    def get_nowait(self, rank: int, epoch: int):
+        return self.queues[epoch][rank].get_nowait()
 
-    def get_nowait_batch(self, queue_idx: int, num_items):
-        if num_items > self.qsize(queue_idx):
+    def get_nowait_batch(self, rank: int, epoch: int, num_items: int = None):
+        if num_items is None:
+            # If num_items isn't specified, get all items in the queue.
+            num_items = self.qsize(rank, epoch)
+        if num_items > self.qsize(rank, epoch):
             raise Empty(f"Cannot get {num_items} items from queue of size "
                         f"{self.qsize()}.")
-        return [self.queues[queue_idx].get_nowait() for _ in range(num_items)]
+        return [
+            self.queues[epoch][rank].get_nowait() for _ in range(num_items)]
+
+    def task_done(self, rank: int, epoch: int, num_items: int = 1):
+        for _ in range(num_items):
+            self.queues[epoch][rank].task_done()
+
+    def ready(self):
+        pass
