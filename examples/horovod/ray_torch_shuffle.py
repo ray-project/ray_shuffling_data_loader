@@ -101,8 +101,10 @@ parser.add_argument(
     default=1.0,
     help=("apply gradient predivide factor in optimizer "
           "(default: 1.0)"))
-parser.add_argument("--num-workers", type=int, default=4)
-parser.add_argument("--cpus-per-worker", type=int, default=2)
+parser.add_argument("--num-workers", type=int, default=None)
+parser.add_argument("--num-hosts", type=int, default=None)
+parser.add_argument("--num-workers-per-host", type=int, default=None)
+parser.add_argument("--cpus-per-worker", type=int, default=1)
 parser.add_argument("--mock-train-step-time", type=float, default=1.0)
 
 # Synthetic training data generation settings.
@@ -231,9 +233,8 @@ def train_main(args, filenames):
     print(f"Starting training on worker {rank}.")
     batch_wait_times = []
     for epoch in range(args.epochs):
-        # TODO(Clark): Don't include stats from first epoch since we already
-        # expect that epoch to be cold?
         batch_wait_times.extend(_train(epoch))
+    batch_wait_times.pop(0)
     print(f"Done training on worker {rank}.")
     avg_batch_wait_time = np.mean(batch_wait_times)
     std_batch_wait_time = np.std(batch_wait_times)
@@ -316,15 +317,29 @@ if __name__ == "__main__":
           f"{human_readable_size(num_bytes)}.")
 
     print("Create Ray executor")
+    worker_kwargs = {}
     num_workers = args.num_workers
+    num_hosts = args.num_hosts
+    num_workers_per_host = args.num_workers_per_host
+    if num_workers is not None:
+        if num_hosts is not None:
+            raise ValueError(
+                "Only one of --num-workers and --num-hosts should be used.")
+        worker_kwargs["num_workers"] = num_workers
+    elif num_hosts is not None:
+        worker_kwargs["num_hosts"] = num_hosts
+        if num_workers_per_host is None:
+            raise ValueError("When giving --num-hosts, --num-workers-per-host "
+                             "must also be given.")
+        worker_kwargs["num_workers_per_host"] = num_workers_per_host
     cpus_per_worker = args.cpus_per_worker
     settings = RayExecutor.create_settings(timeout_s=30)
     executor = RayExecutor(
         settings,
-        num_workers=num_workers,
         use_gpu=True,
         gpus_per_worker=1,
-        cpus_per_worker=cpus_per_worker)
+        cpus_per_worker=cpus_per_worker,
+        **worker_kwargs)
     executor.start()
     executor.run(train_main, args=[args, filenames])
     executor.shutdown()
