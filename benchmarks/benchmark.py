@@ -202,6 +202,7 @@ if __name__ == "__main__":
         type=float,
         default=DEFAULT_UTILIZATION_SAMPLE_PERIOD)
     parser.add_argument("--cluster", action="store_true")
+    parser.add_argument("--object-store-memory", type=int, default=None)
     parser.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR)
     parser.add_argument("--stats-dir", type=str, default=DEFAULT_STATS_DIR)
     parser.add_argument("--clear-old-data", action="store_true")
@@ -238,12 +239,21 @@ if __name__ == "__main__":
         for f in files:
             os.remove(f)
 
+    object_store_memory = args.object_store_memory
     if args.cluster:
+        if object_store_memory is not None:
+            raise ValueError("Can't specify --object-store-memory when "
+                             "connecting to existing cluster.")
         print("Connecting to an existing Ray cluster.")
         ray.init(address="auto")
     else:
         print("Starting a new local Ray cluster.")
-        ray.init(resources={"resources": 100})
+        if object_store_memory is not None:
+            print(f"Giving the object store "
+                  f"{human_readable_size(object_store_memory)}.")
+        ray.init(
+            object_store_memory=object_store_memory,
+            resources={"resources": 100})
 
     num_rows = args.num_rows
     num_row_groups_per_file = args.num_row_groups_per_file
@@ -305,6 +315,12 @@ if __name__ == "__main__":
                       num_trainers, num_epochs, max_concurrent_epochs)
     else:
         print("Shuffle trials done, no detailed stats collected.")
+
+        from ray.internal.internal_api import memory_summary
+        from ray._private.services import get_ray_address_to_use_or_die
+        address = get_ray_address_to_use_or_die()
+        print(memory_summary(address, stats_only=True))
+
         times, _ = zip(*all_stats)
         mean = np.mean(times)
         std = np.std(times)

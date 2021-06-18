@@ -683,7 +683,7 @@ def get_store_stats(timeout=5):
         node_manager_pb2.FormatGlobalMemoryInfoRequest(
             include_memory_info=False),
         timeout=timeout)
-    return reply.store_stats
+    return reply
 
 
 def collect_store_stats(store_stats,
@@ -691,12 +691,12 @@ def collect_store_stats(store_stats,
                         utilization_sample_period,
                         do_print=True,
                         fetch_timeout=10):
+    from ray.internal.internal_api import store_stats_summary
     is_done = False
     while not is_done:
         get_time = timeit.default_timer()
-        stats = get_store_stats(timeout=fetch_timeout)
+        reply = get_store_stats(timeout=fetch_timeout)
         if do_print:
-            print(f"Current object store utilization: "
-                  f"{human_readable_size(stats.object_store_bytes_used)}")
-        store_stats.append((get_time, stats))
+            print(store_stats_summary(reply))
+        store_stats.append((get_time, reply.store_stats))
         is_done = done_event.wait(timeout=utilization_sample_period)
