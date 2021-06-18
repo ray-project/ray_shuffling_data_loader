@@ -1,12 +1,8 @@
 # An unique identifier for the head node and workers of this cluster.
 cluster_name: shuffling-data-loader-horovod
 
-# The maximum number of workers nodes to launch in addition to the head
-# node. This takes precedence over min_workers. min_workers default to 0.
-min_workers: 3
-initial_workers: 3
-max_workers: 3
-
+min_workers: 8
+max_workers: 8
 # target_utilization_fraction: 0.9
 
 # If a node is idle for this many minutes, it will be removed.
@@ -28,78 +24,76 @@ auth:
     ssh_user: ubuntu
     ssh_private_key: ~/.ssh/clark-dev-autoscaler-us-west.pem
 
+available_node_types:
+    ray.head.default:
+        min_workers: 0
+        max_workers: 0
+        resources: {}
+        node_config:
+            InstanceType: i3.4xlarge
+            KeyName: clark-dev-autoscaler-us-west
+    shuffling_node:
+        min_workers: 4
+        max_workers: 4
+        resources: {}
+        node_config:
+            InstanceType: i3.4xlarge
+            KeyName: clark-dev-autoscaler-us-west
+    training_node:
+        min_workers: 4
+        max_workers: 4
+        resources: {}
+        node_config:
+            InstanceType: p3.8xlarge
+            KeyName: clark-dev-autoscaler-us-west
+
+head_node_type: ray.head.default
+
 head_node:
-    InstanceType: p3.8xlarge
-    # InstanceType: g4dn.xlarge
     ImageId: latest_dlami
-    KeyName: clark-dev-autoscaler-us-west
-    # Set primary volume to 25 GiB
-    BlockDeviceMappings:
-        - DeviceName: /dev/sda1
-          Ebs:
-              VolumeSize: 300
     TagSpecifications:
         - ResourceType: "instance"
           Tags:
               - Key: anyscale-user
                 Value: "clark@anyscale.com"
               - Key: anyscale-expiration
-                Value: "2021-06-10"
-    # InstanceMarketOptions:
-    #     MarketType: spot
-           # SpotOptions:
-           #     MaxPrice: "9.0"
+                Value: "2021-06-20"
 
 
 worker_nodes:
-    InstanceType: p3.8xlarge
     ImageId: latest_dlami
-    KeyName: clark-dev-autoscaler-us-west
-    IamInstanceProfile:
-        Arn: arn:aws:iam::959243851260:instance-profile/ray-autoscaler-v1
     TagSpecifications:
         - ResourceType: "instance"
           Tags:
               - Key: anyscale-user
                 Value: "clark@anyscale.com"
               - Key: anyscale-expiration
-                Value: "2021-06-10"
-    # Run workers on spot by default. Comment this out to use on-demand.
-    # InstanceMarketOptions:
-    #     MarketType: spot
-        # SpotOptions:
-        #     MaxPrice: "9.0"
+                Value: "2021-06-20"
 
 file_mounts: {
-    # /home/ubuntu/anaconda3/lib/python3.7/site-packages/horovod-0.21.1-py3.7-linux-x86_64.egg/horovod/ray/elastic.py: ~/dev/horovod/horovod/ray/elastic.py,
-    # /home/ubuntu/horovod/: /Users/rliaw/dev/horovod,
-    "/home/ray/ray_shuffling_data_loader": "/home/ubuntu/workspace/ray_shuffling_data_loader",
+    "~/ray_shuffling_data_loader": "/home/ubuntu/workspace/ray_shuffling_data_loader",
 }
 
 setup_commands:
-    - pip install boto3 fsspec==2021.05.0 tqdm torch torchvision tensorboard s3fs==2021.05.0 pyarrow
+    - pip install -U --user boto3 tqdm torch torchvision tensorboard
+    - pip install -U --user numpy pandas pyarrow fastparquet s3fs==2021.05.0 fsspec==2021.05.0
     # - pip install -U ray==1.3.0
-    - pip install -U https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-2.0.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
+    # - pip install -U https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-2.0.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
+    - pip install -U --user https://s3-us-west-2.amazonaws.com/ray-wheels/test_wheels/concurrent-actor-too-many-threads-fix-lost-object-bug-fix-wheel/894fc873eade502c43e00d7e12863f8a8b0ec410/ray-2.0.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
     # - pip install -U git+https://github.com/ray-project/ray_shuffling_data_loader.git@feat/consumer-redesign#egg=ray_shuffling_data_loader
-    - cp -r /home/ray/ray_shuffling_data_loader /home/ray/tmp_ray_shuffle && cd /home/ray/tmp_ray_shuffle && pip install -e .
+    - cp -r ~/ray_shuffling_data_loader ~/tmp_ray_shuffle && cd ~/tmp_ray_shuffle && pip install -e .
     # - docker pull richardliaw/horovod
     # - pip install ray[tune]
     # - cd horovod && git submodule update --init --recursive
     # - cd horovod && HOROVOD_WITHOUT_MXNET=1 HOROVOD_WITH_PYTORCH=1 HOROVOD_WITH_GLOO=1 HOROVOD_WITHOUT_MPI=1 python setup.py install
 
-# Custom commands that will be run on the head node after common setup.
-head_setup_commands: []
-
-# Custom commands that will be run on worker nodes after common setup.
-worker_setup_commands: []
-
 # # Command to start ray on the head node. You don't need to change this.
 head_start_ray_commands:
     - ray stop --force
-    - ray start --head --port=6379 --object-manager-port=8076 --autoscaling-config=~/ray_bootstrap_config.yaml --object-store-memory=$(( 75 * 1000 * 1000 * 1000 )) --system-config='{"automatic_object_spilling_enabled":false,"idle_worker_killing_time_threshold_ms":1000000}'
+    - ray start --head --port=6379 --object-manager-port=8076 --autoscaling-config=~/ray_bootstrap_config.yaml --object-store-memory=$(( 40 * 1000 * 1000 * 1000 )) --system-config='{"automatic_object_spilling_enabled":false,"idle_worker_killing_time_threshold_ms":1000000}'
 
 # Command to start ray on worker nodes. You don't need to change this.
 worker_start_ray_commands:
     - ray stop --force
-    - ray start --address=$RAY_HEAD_IP:6379 --object-manager-port=8076 --object-store-memory=$(( 75 * 1000 * 1000 * 1000 ))
+    - ray start --address=$RAY_HEAD_IP:6379 --object-manager-port=8076 --object-store-memory=$(( 40 * 1000 * 1000 * 1000 ))
 
