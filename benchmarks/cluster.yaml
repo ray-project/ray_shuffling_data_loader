@@ -161,6 +161,9 @@ setup_commands:
     # below with a git checkout <your_sha> (and possibly a recompile).
     # Uncomment the following line if you want to run the nightly version of ray (as opposed to the latest)
     # - pip install -U https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-1.2.0.dev0-cp37-cp37m-manylinux2014_x86_64.whl
+    # Use nvme disk for storing ray logs, spilled files and fallback allocator in case /tmp run out of space.
+    - mkdir -p /mnt/disk1/ray
+    - ln -s /mnt/disk1/ray /tmp/ray
 
 # Custom commands that will be run on the head node after common setup.
 head_setup_commands: []
