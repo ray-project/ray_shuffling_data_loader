@@ -1,4 +1,6 @@
 import functools
+import shutil
+import tempfile
 from typing import Any, Callable, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -237,15 +239,15 @@ def convert_to_tensor(df: pd.DataFrame, feature_columns: List[Any],
 if __name__ == "__main__":
     import ray
     from ray_shuffling_data_loader.stats import human_readable_size
-    from ray_shuffling_data_loader.data_generation import (
-        generate_data, DATA_SPEC)
+    from ray_shuffling_data_loader.data_generation import (generate_data,
+                                                           DATA_SPEC)
     print("Starting Ray...")
     ray.init(_system_config={"idle_worker_killing_time_threshold_ms": 10**6})
     num_rows = 10**6
     num_files = 10
     num_row_groups_per_file = 1
     max_row_group_skew = 0.0
-    data_dir = "data"
+    data_dir = tempfile.mkdtemp()
     print(f"Generating {num_rows} rows over {num_files} files, with "
           f"{num_row_groups_per_file} row groups per file and at most "
           f"{100 * max_row_group_skew:.1f}% row group skew.")
@@ -304,3 +306,4 @@ if __name__ == "__main__":
             print(f"Epoch {epoch} - consuming batch {batch_idx}: "
                   f"{len(data)} features, {len(targets)} samples")
     print("Done consuming batches.")
+    shutil.rmtree(data_dir)
