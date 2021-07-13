@@ -61,9 +61,8 @@ class BatchQueue:
             if name is not None:
                 actor_options["name"] = name
             self.actor = ray.remote(_QueueActor).options(
-                **actor_options).remote(
-                    max_concurrent_epochs, num_epochs,
-                    num_trainers, maxsize)
+                **actor_options).remote(max_concurrent_epochs, num_epochs,
+                                        num_trainers, maxsize)
 
     def ready(self):
         """
@@ -134,7 +133,8 @@ class BatchQueue:
         return ray.get(self.actor.full.remote(rank, epoch))
 
     def put(self,
-            rank: int, epoch: int,
+            rank: int,
+            epoch: int,
             item: Any,
             block: bool = True,
             timeout: Optional[float] = None) -> None:
@@ -163,7 +163,8 @@ class BatchQueue:
                 ray.get(self.actor.put.remote(rank, epoch, item, timeout))
 
     def put_batch(self,
-                  rank: int, epoch: int,
+                  rank: int,
+                  epoch: int,
                   items: Iterable,
                   block: bool = True,
                   timeout: Optional[float] = None) -> None:
@@ -193,8 +194,10 @@ class BatchQueue:
                     self.actor.put_batch.remote(rank, epoch, items, timeout))
 
     async def put_async(self,
-                        rank: int, epoch: int,
-                        item: Any, block: bool = True,
+                        rank: int,
+                        epoch: int,
+                        item: Any,
+                        block: bool = True,
                         timeout: Optional[float] = None) -> None:
         """Adds an item to the queue.
 
@@ -221,7 +224,8 @@ class BatchQueue:
                 await self.actor.put.remote(rank, epoch, item, timeout)
 
     def get(self,
-            rank: int, epoch: int,
+            rank: int,
+            epoch: int,
             block: bool = True,
             timeout: Optional[float] = None) -> Any:
         """Gets an item from the queue.
@@ -252,7 +256,8 @@ class BatchQueue:
                 return ray.get(self.actor.get.remote(rank, epoch, timeout))
 
     async def get_async(self,
-                        rank: int, epoch: int,
+                        rank: int,
+                        epoch: int,
                         block: bool = True,
                         timeout: Optional[float] = None) -> Any:
         """Gets an item from the queue.
@@ -308,8 +313,8 @@ class BatchQueue:
         """
         return self.get(rank, epoch, block=False)
 
-    def get_nowait_batch(
-            self, rank: int, epoch: int, num_items: int = None) -> List[Any]:
+    def get_nowait_batch(self, rank: int, epoch: int,
+                         num_items: int = None) -> List[Any]:
         """Gets items from the queue and returns them in a
         list in order.
 
@@ -376,21 +381,15 @@ def connect_queue_actor(name, num_retries=5):
 
 
 class _QueueActor:
-    def __init__(
-            self, max_epochs, num_epochs, num_trainers, maxsize):
+    def __init__(self, max_epochs, num_epochs, num_trainers, maxsize):
         self.max_epochs = max_epochs
         self.num_epochs = num_epochs
         self.curr_epochs = collections.deque()
-        self.queues = [
-            [
-                asyncio.Queue(maxsize)
-                for _ in range(num_trainers)]
-            for _ in range(num_epochs)]
-        self.queue_producer_done = [
-            [
-                asyncio.Event()
-                for _ in range(num_trainers)]
-            for _ in range(num_epochs)]
+        self.queues = [[asyncio.Queue(maxsize) for _ in range(num_trainers)]
+                       for _ in range(num_epochs)]
+        self.queue_producer_done = [[
+            asyncio.Event() for _ in range(num_trainers)
+        ] for _ in range(num_epochs)]
         self.maxsize = maxsize
 
     async def new_epoch(self, epoch: int):
@@ -408,12 +407,11 @@ class _QueueActor:
             first_epoch = self.curr_epochs.popleft()
             # Wait until queue producers for all trainers are done.
             await asyncio.wait([
-                event.wait()
-                for event in self.queue_producer_done[first_epoch]])
+                event.wait() for event in self.queue_producer_done[first_epoch]
+            ])
             # Wait until trainers are done with batches.
-            await asyncio.wait([
-                queue.join()
-                for queue in self.queues[first_epoch]])
+            await asyncio.wait(
+                [queue.join() for queue in self.queues[first_epoch]])
             # TODO(Clark): The queues and events for this epoch should no
             # longer be accessed after this point, so we could set them to
             # None here and save some space.
@@ -426,12 +424,13 @@ class _QueueActor:
     async def wait_until_all_epochs_done(self):
         await asyncio.wait([
             event.wait()
-            for event in self.queue_producer_done[self.num_epochs - 1]])
+            for event in self.queue_producer_done[self.num_epochs - 1]
+        ])
         # With the final epoch producer being done, we're guaranteed that
         # no more batches will be added to the queue, so we join on the
         # current queue items.
-        await asyncio.wait([
-            queue.join() for queue in self.queues[self.num_epochs - 1]])
+        await asyncio.wait(
+            [queue.join() for queue in self.queues[self.num_epochs - 1]])
 
     def size(self):
         return sum(q.qsize() for queues in self.queues for q in queues)
@@ -498,7 +497,8 @@ class _QueueActor:
             raise Empty(f"Cannot get {num_items} items from queue of size "
                         f"{self.qsize()}.")
         return [
-            self.queues[epoch][rank].get_nowait() for _ in range(num_items)]
+            self.queues[epoch][rank].get_nowait() for _ in range(num_items)
+        ]
 
     def task_done(self, rank: int, epoch: int, num_items: int = 1):
         for _ in range(num_items):

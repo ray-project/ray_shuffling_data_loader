@@ -12,6 +12,7 @@ class BatchConsumer:
     """
     Interface for consumers of the shuffle outputs.
     """
+
     def consume(self, rank, epoch, batches):
         """
         Consume the provided batches for the given trainer and epoch.
@@ -47,13 +48,14 @@ class BatchConsumer:
 #
 
 
-def shuffle(filenames: List[str],
-            batch_consumer: BatchConsumer,
-            num_epochs: int,
-            num_reducers: int,
-            num_trainers: int,
-            stats_collector: Union[TrialStatsCollector, None] = None,
-            ) -> Union[TrialStats, float]:
+def shuffle(
+        filenames: List[str],
+        batch_consumer: BatchConsumer,
+        num_epochs: int,
+        num_reducers: int,
+        num_trainers: int,
+        stats_collector: Union[TrialStatsCollector, None] = None,
+) -> Union[TrialStats, float]:
     """
     Shuffle the provided dataset every epoch.
 
@@ -71,9 +73,8 @@ def shuffle(filenames: List[str],
         # Wait until consumer is ready for another epoch shuffle to start.
         batch_consumer.wait_until_ready(epoch_idx)
 
-        shuffle_epoch(
-            epoch_idx, filenames, batch_consumer, num_reducers, num_trainers,
-            stats_collector)
+        shuffle_epoch(epoch_idx, filenames, batch_consumer, num_reducers,
+                      num_trainers, stats_collector)
 
     batch_consumer.wait_until_all_epochs_done()
     end = timeit.default_timer()
@@ -86,9 +87,11 @@ def shuffle(filenames: List[str],
 
 
 def shuffle_epoch(
-        epoch: int, filenames: List[str],
+        epoch: int,
+        filenames: List[str],
         batch_consumer: BatchConsumer,
-        num_reducers: int, num_trainers: int,
+        num_reducers: int,
+        num_trainers: int,
         stats_collector: Union[TrialStatsCollector, None] = None) -> None:
     """
     Shuffle the provided dataset for the specified epoch.
@@ -107,8 +110,8 @@ def shuffle_epoch(
     reducers_partitions = []
     for filename in filenames:
         file_reducer_parts = shuffle_map.options(
-            num_returns=num_reducers).remote(
-                filename, num_reducers, stats_collector, epoch)
+            num_returns=num_reducers).remote(filename, num_reducers,
+                                             stats_collector, epoch)
         if not isinstance(file_reducer_parts, list):
             file_reducer_parts = [file_reducer_parts]
         reducers_partitions.append(file_reducer_parts)
@@ -116,11 +119,10 @@ def shuffle_epoch(
     shuffled = []
     for reducer_idx, reducer_partitions in enumerate(
             zip(*reducers_partitions)):
-        consumer_batches = shuffle_reduce.remote(
-            reducer_idx, stats_collector, epoch, *reducer_partitions)
+        consumer_batches = shuffle_reduce.remote(reducer_idx, stats_collector,
+                                                 epoch, *reducer_partitions)
         shuffled.append(consumer_batches)
-    for rank, batches in enumerate(
-            np.array_split(shuffled, num_trainers)):
+    for rank, batches in enumerate(np.array_split(shuffled, num_trainers)):
         consume(rank, batch_consumer, epoch, list(batches))
 
 
@@ -198,9 +200,8 @@ def shuffle_reduce(reduce_index: int,
     return batch
 
 
-def consume(
-        rank: int, batch_consumer: BatchConsumer, epoch: int,
-        batches: List[ray.ObjectRef]) -> None:
+def consume(rank: int, batch_consumer: BatchConsumer, epoch: int,
+            batches: List[ray.ObjectRef]) -> None:
     """
     Consume the provided batches. This is the sink of the shuffle.
 

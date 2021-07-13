@@ -265,9 +265,8 @@ class ObjectStoreStatsCollector:
         self._done_event = threading.Event()
         self._store_stats_collector_thread = threading.Thread(
             target=collect_store_stats,
-            args=(
-                self._store_stats, self._done_event,
-                self._utilization_sample_period))
+            args=(self._store_stats, self._done_event,
+                  self._utilization_sample_period))
         self._store_stats_collector_thread.start()
 
     def __exit__(self, *exc_details):
@@ -278,6 +277,7 @@ class ObjectStoreStatsCollector:
 
     def get_stats(self):
         return self._store_stats
+
 
 #
 # Stats processing utilities.
@@ -321,8 +321,7 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
     hr_num_rows = human_readable_big_num(num_rows)
     hr_batch_size = human_readable_big_num(batch_size)
     now = datetime.datetime.utcnow().isoformat()
-    filename = (
-        f"trial_stats_{hr_num_rows}_rows_{hr_batch_size}_batch_size")
+    filename = (f"trial_stats_{hr_num_rows}_rows_{hr_batch_size}_batch_size")
     if unique_stats:
         filename += f"_{now}.csv"
     else:
@@ -431,10 +430,8 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
                 getattr(store_stats_, "object_store_bytes_used", 0)
                 for _, store_stats_ in store_stats
             ]
-            row["avg_object_store_utilization"] = np.mean(
-                store_bytes_used)
-            row["max_object_store_utilization"] = np.max(
-                store_bytes_used)
+            row["avg_object_store_utilization"] = np.mean(store_bytes_used)
+            row["max_object_store_utilization"] = np.max(store_bytes_used)
 
             # Calculate the trial stats.
             row["avg_epoch_duration"] = np.mean(epoch_durations)
@@ -528,8 +525,8 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
                 "num_epochs": num_epochs,
                 "max_concurrent_epochs": max_concurrent_epochs,
             }
-            for trial, (
-                    trial_stats, trial_store_stats) in enumerate(all_stats):
+            for trial, (trial_stats,
+                        trial_store_stats) in enumerate(all_stats):
                 row["trial"] = trial
                 for epoch, stats in enumerate(trial_stats.epoch_stats):
                     row["epoch"] = epoch
@@ -621,7 +618,7 @@ def process_stats(all_stats, overwrite_stats, stats_dir, no_epoch_stats,
                     for (
                             timestamp,
                             num_rows_in_reducer_batch,
-                            ) in stats.consume_stats.consume_times.items():
+                    ) in stats.consume_stats.consume_times.items():
                         row["timestamp"] = timestamp
                         row["num_rows_in_reducer_batch"] = (
                             num_rows_in_reducer_batch)
