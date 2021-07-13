@@ -1,3 +1,5 @@
+import shutil
+import tempfile
 from typing import List
 
 import pandas as pd
@@ -156,9 +158,9 @@ class ShufflingDataset:
                     df_buffer = None
                 # Yield batches from the current dataframe.
                 pos = offset  # Fallback if offset > len(df).
-                for pos in range(
-                        offset, len(df) - self._batch_size + 1,
-                        self._batch_size):
+                for pos in range(offset,
+                                 len(df) - self._batch_size + 1,
+                                 self._batch_size):
                     yield df[pos:pos + self._batch_size]
                 # If leftover (incomplete) batch, save for later.
                 pos += self._batch_size
@@ -171,8 +173,8 @@ class ShufflingDataset:
             if num_outstanding_batches > 0:
                 # Signal to the queue that we're done processing these GPU
                 # batches.
-                self._batch_queue.task_done(
-                    self._rank, self._epoch, num_outstanding_batches)
+                self._batch_queue.task_done(self._rank, self._epoch,
+                                            num_outstanding_batches)
 
         # Yield leftover (incomplete) batch if we're not dropping incomplete
         # batches.
@@ -215,7 +217,7 @@ if __name__ == "__main__":
     num_files = 10
     num_row_groups_per_file = 1
     max_row_group_skew = 0.0
-    data_dir = "data"
+    data_dir = tempfile.mkdtemp()
     print(f"Generating {num_rows} rows over {num_files} files, with "
           f"{num_row_groups_per_file} row groups per file and at most "
           f"{100 * max_row_group_skew:.1f}% row group skew.")
@@ -247,3 +249,4 @@ if __name__ == "__main__":
         for batch_idx, batch in enumerate(ds):
             print(f"Consuming batch {batch_idx}!")
     print("Done consuming batches.")
+    shutil.rmtree(data_dir)
