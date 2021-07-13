@@ -4,7 +4,4 @@ from ray_shuffling_data_loader.shuffle import shuffle
 
 __version__ = "0.1.0"
 
-__all__ = [
-    "TorchShufflingDataset",
-    "ShufflingDataset",
-    "shuffle"]
+__all__ = ["TorchShufflingDataset", "ShufflingDataset", "shuffle"]
