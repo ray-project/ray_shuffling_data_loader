@@ -3,10 +3,12 @@ import tempfile
 import unittest
 import pytest
 
+import pandas as pd
+
 import ray
 
 from ray_shuffling_data_loader.data_generation import generate_data
-from ray_shuffling_data_loader.shuffle import shuffle_map
+from ray_shuffling_data_loader.shuffle import shuffle_map, shuffle_reduce
 
 
 class DataLoaderShuffleTest(unittest.TestCase):
@@ -41,7 +43,7 @@ class DataLoaderShuffleTest(unittest.TestCase):
 
         reducer_parts = shuffle_map.remote(
             filename=self.filenames[0],
-            num_reducers=4,
+            num_reducers=num_reducers,
             stats_collector=None,
             epoch=0)
 
@@ -64,6 +66,45 @@ class DataLoaderShuffleTest(unittest.TestCase):
 
         assert len(set(all_keys)) == len(all_keys), \
             "Keys in full dataset are not distinct."
+
+    def testShuffleReduce(self):
+        num_reducers = 4
+        num_shufflers = 2
+
+        reducer_parts = shuffle_map.remote(
+            filename=self.filenames[0],
+            num_reducers=num_reducers,
+            stats_collector=None,
+            epoch=0)
+
+        fetched_parts = ray.get(reducer_parts)
+
+        # We cannot get the original references here, so we just push
+        # to the object store again as a workaround
+        fetched_refs = [ray.put(part) for part in fetched_parts]
+
+        parts_per_shuffler = num_reducers // num_shufflers
+        for i in range(num_shufflers):
+            unshuffled_refs = fetched_refs[(i * parts_per_shuffler):(
+                i + 1 * parts_per_shuffler)]
+            unshuffled_parts = fetched_parts[(i * parts_per_shuffler):(
+                i + 1 * parts_per_shuffler)]
+
+            shuffled = ray.get(
+                shuffle_reduce.remote(
+                    0,
+                    None,
+                    0,
+                    *unshuffled_refs,
+                ))
+
+            unshuffled = pd.concat(unshuffled_parts, copy=False)
+
+            assert len(unshuffled) == len(shuffled), \
+                "Length mismatch between unshuffled and shuffled parts"
+
+            assert set(unshuffled) == set(shuffled), \
+                "Key mismatch between unshuffled and shuffled parts"
 
 
 if __name__ == "__main__":
