@@ -6,7 +6,7 @@ END_STATUS=0
 ###
 # ADD TEST SCRIPTS HERE
 ###
-# if ! python -m pytest -v --durations=0 -x "test_.py" ; then END_STATUS=1; fi
+if ! python -m pytest -v --durations=0 -x "test_batch_queue.py" ; then END_STATUS=1; fi
 ###
 # END
 ###

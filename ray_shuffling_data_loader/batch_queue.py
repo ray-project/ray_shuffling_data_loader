@@ -482,7 +482,8 @@ class _QueueActor:
         if (self.maxsize > 0
                 and len(items) + self.qsize(rank, epoch) > self.maxsize):
             raise Full(f"Cannot add {len(items)} items to queue of size "
-                       f"{self.qsize()} and maxsize {self.maxsize}.")
+                       f"{self.qsize(rank=rank, epoch=epoch)} "
+                       f"and maxsize {self.maxsize}.")
         for item in items:
             self.queues[epoch][rank].put_nowait(item)
 
@@ -495,7 +496,7 @@ class _QueueActor:
             num_items = self.qsize(rank, epoch)
         if num_items > self.qsize(rank, epoch):
             raise Empty(f"Cannot get {num_items} items from queue of size "
-                        f"{self.qsize()}.")
+                        f"{self.qsize(rank=rank, epoch=epoch)}.")
         return [
             self.queues[epoch][rank].get_nowait() for _ in range(num_items)
         ]
