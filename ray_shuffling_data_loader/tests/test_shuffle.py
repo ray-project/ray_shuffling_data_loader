@@ -1,6 +1,8 @@
 import math
 import tempfile
 import unittest
+from collections import defaultdict
+
 import pytest
 
 import pandas as pd
@@ -8,7 +10,8 @@ import pandas as pd
 import ray
 
 from ray_shuffling_data_loader.data_generation import generate_data
-from ray_shuffling_data_loader.shuffle import shuffle_map, shuffle_reduce
+from ray_shuffling_data_loader.shuffle import shuffle_map, shuffle_reduce, \
+    BatchConsumer, shuffle
 
 
 class DataLoaderShuffleTest(unittest.TestCase):
@@ -105,6 +108,66 @@ class DataLoaderShuffleTest(unittest.TestCase):
 
             assert set(unshuffled) == set(shuffled), \
                 "Key mismatch between unshuffled and shuffled parts"
+
+    def testShuffleEndToEnd(self):
+        class EndToEndConsumer(BatchConsumer):
+            def __init__(self):
+                self.rank_epoch_batches = defaultdict(dict)
+
+            def consume(self, rank, epoch, batches):
+                self.rank_epoch_batches[rank][epoch] = ray.get(batches)
+
+            def producer_done(self, rank, epoch):
+                pass
+
+            def wait_until_ready(self, epoch):
+                return True
+
+            def wait_until_all_epochs_done(self):
+                return True
+
+        consumer = EndToEndConsumer()
+        num_epochs = 2
+        num_reducers = 8
+        num_trainers = 4
+
+        shuffle(
+            self.filenames,
+            batch_consumer=consumer,
+            num_epochs=num_epochs,
+            num_reducers=num_reducers,
+            num_trainers=num_trainers)
+
+        assert len(consumer.rank_epoch_batches) == num_trainers, \
+            "Trainer count mismatch"
+
+        assert all(len(consumer.rank_epoch_batches[t]) == num_epochs
+                   for t in consumer.rank_epoch_batches), \
+            "Epoch count mismatch"
+
+        for tid, epoch_batches in consumer.rank_epoch_batches.items():
+            for i in range(len(epoch_batches) - 1):
+                assert len(epoch_batches[i]) == len(
+                    epoch_batches[+1]) == num_epochs, \
+                    "Length mismatch in epoch batches"
+
+                df1 = pd.concat(epoch_batches[i], copy=False)
+                df2 = pd.concat(epoch_batches[i], copy=False)
+
+                keys1 = df1["key"].to_numpy()
+                keys2 = df2["key"].to_numpy()
+
+                set1 = set(keys1)
+                set2 = set(keys2)
+
+                assert len(set1) == len(keys1), \
+                    "Keys in dataset are not distinct."
+
+                assert len(set2) == len(keys2), \
+                    "Keys in dataset are not distinct."
+
+                assert set1 == set2, \
+                    "Shuffled key sets are not equal."
 
 
 if __name__ == "__main__":
