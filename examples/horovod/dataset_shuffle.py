@@ -1,3 +1,4 @@
+import argparse
 import os
 import pickle
 import time
@@ -12,28 +13,17 @@ import torch
 import tempfile
 import horovod.torch as hvd
 from horovod.ray import RayExecutor
+import ray
 
-from ray_shuffling_data_loader.torch_dataset import (TorchShufflingDataset)
-from ray_shuffling_data_loader.data_generation import (generate_data,
-                                                       DATA_SPEC)
+import os
 
-import argparse
+import pandas as pd
+import numpy as np
 
-DEFAULT_DATA_DIR = "s3://shuffling-data-loader-benchmarks/data/"
+import ray
+from generate_data_utils import DATA_SPEC, generate_data
+from embedding_model import MyModel, annotation, huber_loss
 
-numpy_to_torch_dtype = {
-    np.bool: torch.bool,
-    np.uint8: torch.uint8,
-    np.int8: torch.int8,
-    np.int16: torch.int16,
-    np.int32: torch.int32,
-    np.int64: torch.int64,
-    np.float16: torch.float16,
-    np.float32: torch.float32,
-    np.float64: torch.float64,
-    np.complex64: torch.complex64,
-    np.complex128: torch.complex128
-}
 
 # Training settings
 parser = argparse.ArgumentParser(description="PyTorch MNIST Example")
@@ -73,6 +63,11 @@ parser.add_argument(
     default=False,
     help="disables CUDA training")
 parser.add_argument(
+    "--debug",
+    action="store_true",
+    default=False,
+    help="disables hvd")
+parser.add_argument(
     "--seed",
     type=int,
     default=42,
@@ -101,10 +96,8 @@ parser.add_argument(
     default=1.0,
     help=("apply gradient predivide factor in optimizer "
           "(default: 1.0)"))
-parser.add_argument("--num-workers", type=int, default=None)
-parser.add_argument("--num-hosts", type=int, default=None)
-parser.add_argument("--num-workers-per-host", type=int, default=None)
-parser.add_argument("--cpus-per-worker", type=int, default=1)
+parser.add_argument("--num-workers", type=int, default=4)
+parser.add_argument("--cpus-per-worker", type=int, default=2)
 parser.add_argument("--mock-train-step-time", type=float, default=1.0)
 
 # Synthetic training data generation settings.
@@ -116,31 +109,36 @@ parser.add_argument("--num-row-groups-per-file", type=int, default=5)
 parser.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR)
 
 # Shuffling data loader settings.
-parser.add_argument("--num-reducers", type=int, default=32)
-parser.add_argument("--max-concurrent-epochs", type=int, default=2)
-parser.add_argument("--address", default="auto")
+# parser.add_argument("--num-reducers", type=int, default=32)
+# parser.add_argument("--max-concurrent-epochs", type=int, default=2)
+parser.add_argument("--address")
+
+def construct_optimizers(model):
+    sparse_params = []
+    dense_params = []
+    for k,v in model.named_parameters():
+        if "input.embeddings.embeddings" in k:
+            sparse_params.append((k,v))
+        else:
+            dense_params.append((k,v))
+
+    optimizers = []
+    if len(dense_params) > 0:
+        opt = optim.Adam([v for _,v in dense_params], lr=0.001)
+        opt = hvd.DistributedOptimizer(opt, dense_params)
+        optimizers.append(opt)
+    if len(sparse_params) > 0:
+        opt = optim.SparseAdam([v for _,v in sparse_params], lr=0.001)
+        opt = hvd.DistributedOptimizer(opt, sparse_params)
+        optimizers.append(opt)
+
+    if hvd.rank() == 0:
+        print(optimizers)
+
+    return optimizers
 
 
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
-        self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
-        self.conv2_drop = nn.Dropout2d()
-        self.fc1 = nn.Linear(320, 50)
-        self.fc2 = nn.Linear(50, 10)
-
-    def forward(self, x):
-        x = F.relu(F.max_pool2d(self.conv1(x), 2))
-        x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
-        x = x.view(-1, 320)
-        x = F.relu(self.fc1(x))
-        x = F.dropout(x, training=self.training)
-        x = self.fc2(x)
-        return F.log_softmax(x)
-
-
-def train_main(args, filenames):
+def train_main(args, splits):
     # Horovod: initialize library.
     hvd.init()
     torch.manual_seed(args.seed)
@@ -153,72 +151,52 @@ def train_main(args, filenames):
     # Horovod: limit # of CPU threads to be used per worker.
     torch.set_num_threads(1)
     rank = hvd.rank()
-    train_dataset = create_dataset(
-        filenames,
-        batch_size=args.batch_size,
-        rank=rank,
-        num_epochs=args.epochs,
-        world_size=hvd.size(),
-        num_reducers=args.num_reducers,
-        max_concurrent_epochs=args.max_concurrent_epochs)
-    model = Net()
-    # By default, Adasum doesn"t need scaling up learning rate.
-    lr_scaler = hvd.size() if not args.use_adasum else 1
+    my_split = splits[rank]
+    train_dataset = create_torch_iterator(my_split, args.batch_size)
 
+    model = MyModel(annotation)
+    # By default, Adasum doesn"t need scaling up learning rate.
     if torch.cuda.is_available() and not args.no_cuda:
         # Move model to GPU.
         model.cuda()
-        # If using GPU Adasum allreduce, scale learning rate by local_size.
-        if args.use_adasum and hvd.nccl_built():
-            lr_scaler = hvd.local_size()
 
-    # Horovod: scale learning rate by lr_scaler.
-    optimizer = optim.SGD(
-        model.parameters(), lr=args.lr * lr_scaler, momentum=args.momentum)
-
+    optimizers = construct_optimizers(model)
+    loss_function = huber_loss
     # Horovod: broadcast parameters & optimizer state.
     hvd.broadcast_parameters(model.state_dict(), root_rank=0)
-    hvd.broadcast_optimizer_state(optimizer, root_rank=0)
-
-    # Horovod: (optional) compression algorithm.
-    compression = (hvd.Compression.fp16
-                   if args.fp16_allreduce else hvd.Compression.none)
-
-    # Horovod: wrap optimizer with DistributedOptimizer.
-    optimizer = hvd.DistributedOptimizer(
-        optimizer,
-        named_parameters=model.named_parameters(),
-        compression=compression,
-        op=hvd.Adasum if args.use_adasum else hvd.Average,
-        gradient_predivide_factor=args.gradient_predivide_factor)
+    for opt in optimizers:
+        hvd.broadcast_optimizer_state(opt, root_rank=0)
 
     def _train(epoch):
         model.train()
         # Horovod: set epoch to sampler for shuffling.
-        train_dataset.set_epoch(epoch)
+        # train_dataset.set_epoch(epoch)
         start_epoch = timeit.default_timer()
         last_batch_time = start_epoch
         batch_wait_times = []
         for batch_idx, (data, target) in enumerate(train_dataset):
             batch_wait_times.append(timeit.default_timer() - last_batch_time)
-            print(type(data), type(target), args.no_cuda)
             if torch.cuda.is_available() and not args.no_cuda:
-                print("checking isinstance")
-                if isinstance(data, list):
-                    data = torch.tensor(data).cuda()
-
+                data = [t.cuda() for t in data]
                 target = target.cuda()
             optimizer.zero_grad()
-            # output = model(data)
+            batch = OrderedDict()
+            for name, tensor in zip(annotation["embeddings"], data):
+                batch[name] = tensor
+
+            batch_pred = model(batch)
+
             if batch_idx % args.log_interval == 0:
                 print(
                     f"Processing batch {batch_idx} in epoch {epoch} on worker "
                     f"{rank}.")
             time.sleep(args.mock_train_step_time)
             # TODO(Clark): Add worker synchronization barrier here.
-            # loss = F.nll_loss(output, target)
-            # loss.backward()
-            # optimizer.step()
+            loss = loss_function(batch_pred, target, delta=60)
+            loss.mean().backward()
+            for opt in optimizers:
+                opt.step()
+
             last_batch_time = timeit.default_timer()
         epoch_duration = timeit.default_timer() - start_epoch
         avg_batch_wait_time = np.mean(batch_wait_times)
@@ -239,6 +217,7 @@ def train_main(args, filenames):
         new_batch_times = _train(epoch)
         new_batch_times.pop(0)
         batch_wait_times.extend(new_batch_times)
+
     print(f"Done training on worker {rank}.")
     avg_batch_wait_time = np.mean(batch_wait_times)
     std_batch_wait_time = np.std(batch_wait_times)
@@ -250,7 +229,7 @@ def train_main(args, filenames):
     print(f"Max batch wait time: {max_batch_wait_time:.3f}s")
     print(f"Min batch wait time: {min_batch_wait_time:.3f}s")
 
-    with open(f"/tmp/ray_torch_shuffle_worker_{rank}.csv", "wt") as fp:
+    with open(f"/tmp/dataset_shuffle_worker_{rank}.csv", "wt") as fp:
         fp.writelines([f"{f:.6f}\n" for f in batch_wait_times])
 
     # TODO(Clark): Add logic to the dataset abstraction so we don't have to do
@@ -259,31 +238,60 @@ def train_main(args, filenames):
         print("Waiting in rank 0 worker to let other workers consume queue...")
         time.sleep(10)
         print("Done waiting in rank 0 worker.")
+######################################################
 
 
-def create_dataset(filenames, *, batch_size, rank, num_epochs, world_size,
-                   num_reducers, max_concurrent_epochs):
+DEFAULT_DATA_DIR = "s3://shuffling-data-loader-benchmarks/data/"
+
+numpy_to_torch_dtype = {
+    np.bool: torch.bool,
+    np.uint8: torch.uint8,
+    np.int8: torch.int8,
+    np.int16: torch.int16,
+    np.int32: torch.int32,
+    np.int64: torch.int64,
+    np.float16: torch.float16,
+    np.float32: torch.float32,
+    np.float64: torch.float64,
+    np.complex64: torch.complex64,
+    np.complex128: torch.complex128
+}
+
+
+def create_torch_iterator(split, batch_size, rank=None):
     print(f"Creating Torch shuffling dataset for worker {rank} with "
-          f"{batch_size} batch size, {num_epochs} epochs, {num_reducers} "
-          f"reducers, and {world_size} trainers.")
+          f"{batch_size} batch size.")
     feature_columns = list(DATA_SPEC.keys())
     feature_types = [
         numpy_to_torch_dtype[dtype] for _, _, dtype in DATA_SPEC.values()
     ]
     label_column = feature_columns.pop()
     label_type = feature_types.pop()
-    return TorchShufflingDataset(
-        filenames,
-        num_epochs,
-        world_size,
-        batch_size,
-        rank,
-        num_reducers=num_reducers,
-        max_concurrent_epochs=max_concurrent_epochs,
-        feature_columns=feature_columns,
-        feature_types=feature_types,
-        label_column=label_column,
-        label_type=label_type)
+
+    torch_iterator = split.to_torch(
+         label_column=label_column,
+         feature_columns=feature_columns,
+         label_column_dtype=label_type,
+         feature_column_dtypes=feature_types,
+         batch_size=batch_size,
+         # prefetch_blocks: int = 0,
+         # drop_last: bool = False
+    )
+    return torch_iterator
+
+
+@ray.remote
+def consume(split, rank=None, batch_size=None):
+    torch_iterator = create_torch_iterator(split, batch_size=batch_size, rank=rank)
+    for i, (x, y) in enumerate(torch_iterator):
+        if i % 10 == 0:
+            print(i)
+    return
+
+def create_dataset(filenames):
+    pipeline = ray.data.read_parquet(list(filenames))\
+        .repeat().random_shuffle()
+    return pipeline
 
 
 if __name__ == "__main__":
@@ -291,7 +299,7 @@ if __name__ == "__main__":
     from ray_shuffling_data_loader.stats import human_readable_size
     import ray
     print("Connecting to Ray cluster...")
-    ray.init(address=args.address)
+    ray.init(address="auto")
 
     num_rows = args.num_rows
     num_files = args.num_files
@@ -301,15 +309,12 @@ if __name__ == "__main__":
 
     cache_path = os.path.join(tempfile.gettempdir(), "data_cache")
     filenames = None
-    if args.cache_files and os.path.exists(cache_path):
-        try:
-            with open(cache_path, "rb") as f:
-                filenames, num_bytes = pickle.load(f)
-        except Exception as exc:
-            print(f"Cache load failed - {exc}")
 
+    if args.cache_files:
+        filenames = [
+            f's3://shuffling-data-loader-benchmarks/data/input_data_{i}.parquet.snappy' for i in range(0, 25)
+        ]
     if not filenames:
-
         print(f"Generating {num_rows} rows over {num_files} files, with "
               f"{num_row_groups_per_file} row groups per file and at most "
               f"{100 * max_row_group_skew:.1f}% row group skew.")
@@ -320,36 +325,28 @@ if __name__ == "__main__":
             with open(os.path.join(tempfile.gettempdir(), "data_cache"),
                       "wb") as f:
                 pickle.dump((filenames, num_bytes), f)
-    print(f"Generated {len(filenames)} files containing {num_rows} rows "
-          f"with {num_row_groups_per_file} row groups per file, totalling "
-          f"{human_readable_size(num_bytes)}.")
+        print(f"Generated {len(filenames)} files containing {num_rows} rows "
+              f"with {num_row_groups_per_file} row groups per file, totalling "
+              f"{human_readable_size(num_bytes)}.")
 
-    print("Create Ray executor")
-    worker_kwargs = {}
-    num_workers = args.num_workers
-    num_hosts = args.num_hosts
-    num_workers_per_host = args.num_workers_per_host
-    if num_workers is not None:
-        if num_hosts is not None:
-            raise ValueError(
-                "Only one of --num-workers and --num-hosts should be used.")
-        worker_kwargs["num_workers"] = num_workers
-    elif num_hosts is not None:
-        worker_kwargs["num_hosts"] = num_hosts
-        if num_workers_per_host is None:
-            raise ValueError("When giving --num-hosts, --num-workers-per-host "
-                             "must also be given.")
-        worker_kwargs["num_workers_per_host"] = num_workers_per_host
-    cpus_per_worker = args.cpus_per_worker
-    settings = RayExecutor.create_settings(timeout_s=30)
-    executor = RayExecutor(
-        settings,
-        use_gpu=not args.no_cuda,
-        gpus_per_worker=int(not args.no_cuda),
-        cpus_per_worker=cpus_per_worker,
-        **worker_kwargs)
-    executor.start()
-    executor.run(train_main, args=[args, filenames])
-    executor.shutdown()
+    print(filenames)
+    pipeline = create_dataset(filenames)
+    splits = pipeline.split(args.num_workers)
 
-    print("Done consuming batches.")
+    if args.debug:
+        tasks = [
+            consume.remote(split, rank=idx, batch_size=args.batch_size)
+            for idx, split in enumerate(splits)
+        ]
+        ray.get(tasks)
+    else:
+
+        print("Create Ray executor")
+        settings = RayExecutor.create_settings(timeout_s=30)
+        executor = RayExecutor(
+            settings,
+            num_workers=args.num_workers,
+            use_gpu=not args.no_cuda)
+        executor.start()
+        executor.run(train_main, args=[args, splits])
+        executor.shutdown()
