@@ -1,3 +1,11 @@
+from typing import List
+import argparse
+from collections import OrderedDict
+
+import torch
+from torch import nn, arange, cat, optim
+import torch.nn.functional as F
+import horovod.torch as hvd
 
 class EnumType:
     def __init__(self, name, maxCategories, embed_dim=0):
@@ -79,11 +87,11 @@ class MyInput(nn.Module):
 
         self.output_size = 0
         if 'embeddings' in annotation:
-            self.embeddings = EmbeddingsCollection(annotation["embeddings"])
+            self.embeddings = EmbeddingsCollection(annotation["embeddings"], use_batch_norm=use_bn)
             self.output_size += self.embeddings.output_size
 
         if 'one_hot' in annotation:
-            self.one_hot = OneHotEncodingCollection(annotation["one_hot"])
+            self.one_hot = OneHotEncodingCollection(annotation["one_hot"], use_batch_norm=use_bn)
             self.output_size += self.one_hot.output_size
 
         if self.output_size == 0:
@@ -165,7 +173,7 @@ class MyModel(nn.Module):
         hot1_onehot = (hot1.float().unsqueeze(-1) == hot1_ref).float()
         hot0_onehot = (hot0.float().unsqueeze(-1) == hot0_ref).float()
         network = self.sequential(self.input(buffer))
-        link = self.sequential2(cat([network, hot1_onehot, hot0_onehot], dim=1))
+        link = self.sequential2(cat([network, hot1_onehot, hot0_onehot], dim=2))
         return link.squeeze(-1)
 
 

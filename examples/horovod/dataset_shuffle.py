@@ -1,3 +1,4 @@
+from collections import OrderedDict
 import argparse
 import os
 import pickle
@@ -21,9 +22,9 @@ import pandas as pd
 import numpy as np
 
 import ray
-from generate_data_utils import DATA_SPEC, generate_data
-from embedding_model import MyModel, annotation, huber_loss
-
+from ray_shuffling_data_loader.data_generation import DATA_SPEC, generate_data
+from ray_shuffling_data_loader.embedding_model import MyModel, annotation, huber_loss
+DEFAULT_DATA_DIR = "s3://shuffling-data-loader-benchmarks/data/"
 
 # Training settings
 parser = argparse.ArgumentParser(description="PyTorch MNIST Example")
@@ -101,9 +102,9 @@ parser.add_argument("--cpus-per-worker", type=int, default=2)
 parser.add_argument("--mock-train-step-time", type=float, default=1.0)
 
 # Synthetic training data generation settings.
-parser.add_argument("--cache-files", action="store_true", default=False)
-parser.add_argument("--num-rows", type=int, default=2 * (10**7))
-parser.add_argument("--num-files", type=int, default=25)
+parser.add_argument("--read-cache", action="store_true", default=False)
+parser.add_argument("--num-rows", type=int, default=2 * (10**8))
+parser.add_argument("--num-files", type=int, default=50)
 parser.add_argument("--max-row-group-skew", type=float, default=0.0)
 parser.add_argument("--num-row-groups-per-file", type=int, default=5)
 parser.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR)
@@ -154,7 +155,7 @@ def train_main(args, splits):
     my_split = splits[rank]
     train_dataset = create_torch_iterator(my_split, args.batch_size)
 
-    model = MyModel(annotation)
+    model = MyModel(annotation, use_bn=False)
     # By default, Adasum doesn"t need scaling up learning rate.
     if torch.cuda.is_available() and not args.no_cuda:
         # Move model to GPU.
@@ -179,10 +180,16 @@ def train_main(args, splits):
             if torch.cuda.is_available() and not args.no_cuda:
                 data = [t.cuda() for t in data]
                 target = target.cuda()
-            optimizer.zero_grad()
+            for opt in optimizers:
+                opt.zero_grad()
             batch = OrderedDict()
+            batch["embeddings"] = OrderedDict()
+            batch["one_hot"] = OrderedDict()
             for name, tensor in zip(annotation["embeddings"], data):
-                batch[name] = tensor
+                batch["embeddings"][name] = tensor
+            hot0, hot1 = data[-2:]
+            batch["one_hot"]["hot0"] = hot0
+            batch["one_hot"]["hot1"] = hot1
 
             batch_pred = model(batch)
 
@@ -241,8 +248,6 @@ def train_main(args, splits):
 ######################################################
 
 
-DEFAULT_DATA_DIR = "s3://shuffling-data-loader-benchmarks/data/"
-
 numpy_to_torch_dtype = {
     np.bool: torch.bool,
     np.uint8: torch.uint8,
@@ -288,8 +293,8 @@ def consume(split, rank=None, batch_size=None):
             print(i)
     return
 
-def create_dataset(filenames):
-    pipeline = ray.data.read_parquet(list(filenames))\
+def create_dataset(data_dir):
+    pipeline = ray.data.read_parquet(data_dir)\
         .repeat().random_shuffle()
     return pipeline
 
@@ -305,32 +310,26 @@ if __name__ == "__main__":
     num_files = args.num_files
     num_row_groups_per_file = args.num_row_groups_per_file
     max_row_group_skew = args.max_row_group_skew
-    data_dir = args.data_dir
+
 
     cache_path = os.path.join(tempfile.gettempdir(), "data_cache")
     filenames = None
 
-    if args.cache_files:
-        filenames = [
-            f's3://shuffling-data-loader-benchmarks/data/input_data_{i}.parquet.snappy' for i in range(0, 25)
-        ]
-    if not filenames:
+    data_dir = os.path.join(args.data_dir, f"r{num_rows:_}-f{num_files}/")
+
+    if not args.read_cache:
         print(f"Generating {num_rows} rows over {num_files} files, with "
               f"{num_row_groups_per_file} row groups per file and at most "
               f"{100 * max_row_group_skew:.1f}% row group skew.")
         filenames, num_bytes = generate_data(num_rows, num_files,
                                              num_row_groups_per_file,
                                              max_row_group_skew, data_dir)
-        if args.cache_files:
-            with open(os.path.join(tempfile.gettempdir(), "data_cache"),
-                      "wb") as f:
-                pickle.dump((filenames, num_bytes), f)
         print(f"Generated {len(filenames)} files containing {num_rows} rows "
               f"with {num_row_groups_per_file} row groups per file, totalling "
               f"{human_readable_size(num_bytes)}.")
+        print(f"Saved to: {data_dir}")
 
-    print(filenames)
-    pipeline = create_dataset(filenames)
+    pipeline = create_dataset(data_dir)
     splits = pipeline.split(args.num_workers)
 
     if args.debug:
