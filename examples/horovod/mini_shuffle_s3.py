@@ -83,8 +83,9 @@ def create_torch_iterator(split, batch_size, rank=None):
 
 
 def create_dataset(data_dir):
-    pipeline = ray.data.read_parquet(data_dir)\
-        .repeat().random_shuffle()
+    # pipeline = ray.data.read_parquet(data_dir)\
+    #     .repeat().random_shuffle()
+    print(ray.data.read_parquet(data_dir).take(1))
     return pipeline
 
 if __name__ == '__main__':
@@ -94,6 +95,7 @@ if __name__ == '__main__':
     ray.init(address=args.address)
 
     data_dir = os.path.join(args.data_dir, f"r{args.num_rows:_}-f{args.num_files}/")
+    print(f"creating dataset from: {data_dir}")
     pipeline = create_dataset(data_dir)
     splits = pipeline.split(args.num_workers, equal=True)
 

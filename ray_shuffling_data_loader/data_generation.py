@@ -27,7 +27,7 @@ def generate_data(num_rows, num_files, num_row_groups_per_file,
     return filenames, sum(data_sizes)
 
 
-@ray.remote
+@ray.remote(num_cpus=4)
 def generate_file(file_index, global_row_index, num_rows_in_file,
                   num_row_groups_per_file, data_dir):
     # TODO(Clark): Generate skewed row groups according to max_row_group_skew.

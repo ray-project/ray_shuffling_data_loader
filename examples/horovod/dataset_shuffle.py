@@ -103,8 +103,8 @@ parser.add_argument("--mock-train-step-time", type=float, default=1.0)
 
 # Synthetic training data generation settings.
 parser.add_argument("--read-cache", action="store_true", default=False)
-parser.add_argument("--num-rows", type=int, default=2 * (10**8))
-parser.add_argument("--num-files", type=int, default=50)
+parser.add_argument("--num-rows", type=int, default=2 * (10**9))
+parser.add_argument("--num-files", type=int, default=200)
 parser.add_argument("--max-row-group-skew", type=float, default=0.0)
 parser.add_argument("--num-row-groups-per-file", type=int, default=5)
 parser.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR)
