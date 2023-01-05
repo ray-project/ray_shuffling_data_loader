@@ -1,6 +1,6 @@
 # Deprecated
 
-This library has been deprecated, with our learnings absorbed into the much more general Ray Datasets library ([docs]([url](https://docs.ray.io/en/master/data/dataset.html)), [code]([url](https://github.com/ray-project/ray/tree/master/python/ray/data))).
+This library has been deprecated, with our learnings absorbed into the much more general Ray Datasets library ([docs](https://docs.ray.io/en/master/data/dataset.html), [code](https://github.com/ray-project/ray/tree/master/python/ray/data)).
 
 ## Ray-based Shuffling Data Loader
 
