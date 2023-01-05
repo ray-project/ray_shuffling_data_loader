@@ -1,8 +1,12 @@
-# Ray-based Shuffling Data Loader
+# Deprecated
+
+This library has been deprecated, with our learnings absorbed into the much more general Ray Datasets library ([docs]([url](https://docs.ray.io/en/master/data/dataset.html)), [code]([url](https://github.com/ray-project/ray/tree/master/python/ray/data))).
+
+## Ray-based Shuffling Data Loader
 
 A Ray-based data loader with per-epoch shuffling and configurable pipelining, for shuffling and loading training data for distributed training of machine learning models.
 
-# Installation
+## Installation
 
 You can install latest master via:
 
@@ -10,7 +14,7 @@ You can install latest master via:
 pip install git+https://github.com/ray-project/ray_shuffling_data_loader.git@main#egg=ray_shuffling_data_loader
 ```
 
-# Usage
+## Usage
 
 This shuffling data loader exposes a generic `ShufflingDataset` abstraction that takes a list of input files and shuffling configuration, and yields `batch_size`-sized GPU batches via an iterator. This abstraction is framework-agnostic.
 
